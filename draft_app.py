@@ -280,13 +280,22 @@ if rec:
         f"**VOR {rec['vor']}**  ·  Tier {rec['pos']}T{rec['tier']} ({rec['tier_left']} left in tier)  ·  "
         f"survives to your pick **{surv:.0f}%**\n\n"
         f"➡︎ _{rec['reason']}_")
-    b1, b2 = box.columns([1, 3])
-    if b1.button(f"✅ Draft {rec['name'].split()[-1]}", width="stretch", type="primary"):
-        do_pick(rec["id"]); st.rerun()
+    if on_clock_me:
+        b1, b2 = box.columns([1, 3])
+        if b1.button(f"✅ Draft {rec['name'].split()[-1]}", width="stretch", type="primary"):
+            do_pick(rec["id"]); st.rerun()
+    else:
+        box.caption(f"🎯 Your target for pick {res['my_next_pick']}. "
+                    f"⏳ Team {res['on_clock']} is on the clock — tap who they take below.")
 
-    # quick-draft the rest of the top of the board (chalk going off the board)
-    st.caption("Quick-pick a player for your team:" if st.session_state.get("practice")
-               else "Quick-draft (tap whoever was just taken):")
+    # marking / quick-pick row (context-aware)
+    if st.session_state.get("practice"):
+        _cap = "Quick-pick a player for your team:"
+    elif on_clock_me:
+        _cap = "Your pick — tap your player, or use Draft above:"
+    else:
+        _cap = f"Tap who Team {res['on_clock']} just drafted:"
+    st.caption(_cap)
     chips = st.columns(5)
     for i, a in enumerate(res["best_available"][:5]):
         if chips[i].button(f"{a['name'].split()[-1]} {a['pos']}", key=f"chip_{i}", width="stretch"):
