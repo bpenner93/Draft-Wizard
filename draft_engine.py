@@ -379,8 +379,13 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
             my_roster_ids.append(pid)
 
     current_overall = len(drafted_ids) + 1
-    my_next = next_pick_for_slot(cfg, current_overall)
-    picks_until = (my_next - current_overall) if my_next else 0
+    on_clock_me = team_on_clock(cfg, current_overall) == cfg.my_slot
+    # Survival/scarcity horizon = your NEXT selection STRICTLY AFTER the current pick, so
+    # "survives to your next pick" is never a trivial 100% while you're on the clock, and
+    # cost-of-waiting stays meaningful the moment you're deciding.
+    _future = [n for n in my_pick_numbers(cfg) if n > current_overall]
+    my_next = _future[0] if _future else None
+    picks_until = (my_next - current_overall - (1 if on_clock_me else 0)) if my_next else 0
     my_counts = Counter(by_id[i]["pos"] for i in my_roster_ids if i in by_id)
     rounds_left = cfg.total_rounds() - len(my_roster_ids)
 
