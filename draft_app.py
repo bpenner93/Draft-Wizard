@@ -21,7 +21,8 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 from draft_engine import (load_board, LeagueConfig, analyze, plan_draft,   # noqa: E402
-                          ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance)
+                          ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance,
+                          team_on_clock, grade_draft)
 from draft_names import norm_name, pos_norm                          # noqa: E402
 
 # quick-league presets (the main axes; roster stays standard, your slot is separate)
@@ -254,10 +255,11 @@ if rec:
         do_pick(rec["id"]); st.rerun()
 
     # quick-draft the rest of the top of the board (chalk going off the board)
-    st.caption("Quick-draft (tap whoever was just taken):")
+    st.caption("Quick-pick a player for your team:" if st.session_state.get("practice")
+               else "Quick-draft (tap whoever was just taken):")
     chips = st.columns(5)
     for i, a in enumerate(res["best_available"][:5]):
-        if chips[i].button(f"{a['name'].split()[-1]} {a['pos']}", key=f"chip{a['id']}", width="stretch"):
+        if chips[i].button(f"{a['name'].split()[-1]} {a['pos']}", key=f"chip_{i}", width="stretch"):
             do_pick(a["id"]); st.rerun()
 
 # manual mark-off (search anyone)
@@ -307,6 +309,27 @@ with left:
     st.dataframe(sty, width="stretch", hide_index=True, height=560)
 
 with right:
+    if ss.drafted:
+        st.subheader("Recently drafted")
+        n = len(ss.drafted)
+        rrows = []
+        for overall in range(n, max(0, n - 8), -1):
+            p = by_id.get(ss.drafted[overall - 1])
+            if not p:
+                continue
+            slot = team_on_clock(cfg, overall)
+            rrows.append({"Pk": overall, "By": ("YOU" if slot == cfg.my_slot else f"T{slot}"),
+                          "Player": p["name"], "Pos": p["pos"]})
+        st.dataframe(pd.DataFrame(rrows), hide_index=True, width="stretch", height=180)
+
+    if len(ss.drafted) >= 2 * cfg.teams:
+        g = grade_draft(cfg, ss.drafted, working)
+        st.subheader("Final draft grade" if res["my_next_pick"] is None else "Draft grade so far")
+        gc1, gc2 = st.columns([1, 2])
+        gc1.metric("Grade", g["grade"])
+        gc2.metric(f"Rank {g['my_rank']}/{g['teams']}",
+                   f"{g['pctile']}th pctile · {g['my_value']} vs lg avg {g['league_avg']}")
+
     st.subheader("Your roster")
     if res["my_roster"]:
         st.dataframe(pd.DataFrame([{"Pos": p["pos"], "Player": p["name"], "VOR": p["vor"]}

@@ -629,6 +629,46 @@ def mock_advance(valued_board: list[dict], cfg: LeagueConfig, drafted_ids: list[
     return drafted
 
 
+def _letter(pct: float) -> str:
+    """pct: 1.0 = best team in the league, 0.0 = worst."""
+    for thr, g in ((0.92, "A+"), (0.80, "A"), (0.68, "B+"), (0.55, "B"),
+                   (0.42, "C+"), (0.28, "C"), (0.15, "D"), (0.0, "F")):
+        if pct >= thr:
+            return g
+    return "F"
+
+
+def grade_draft(cfg: LeagueConfig, drafted_ids: list[str], board_in: list[dict]) -> dict:
+    """Grade YOUR roster vs the rest of the league: total value banked (sum of each
+    player's positive VOR) ranked against the other teams -> percentile -> letter."""
+    board = [dict(p) for p in board_in]
+    compute_values(board, cfg)
+    by_id = {p["id"]: p for p in board}
+    val = {s: 0.0 for s in range(1, cfg.teams + 1)}
+    cnt = {s: Counter() for s in range(1, cfg.teams + 1)}
+    best = {s: None for s in range(1, cfg.teams + 1)}
+    for i, pid in enumerate(drafted_ids):
+        p = by_id.get(pid)
+        if not p:
+            continue
+        s = team_on_clock(cfg, i + 1)
+        v = max(0.0, p.get("_vor", 0.0))
+        val[s] += v
+        cnt[s][p["pos"]] += 1
+        if best[s] is None or v > best[s][1]:
+            best[s] = (p.get("name"), v, p["pos"])
+    my = cfg.my_slot
+    order = sorted(val, key=lambda s: -val[s])
+    my_rank = order.index(my) + 1
+    pct = 1.0 - (my_rank - 1) / max(1, cfg.teams - 1)
+    return {
+        "grade": _letter(pct), "my_rank": my_rank, "teams": cfg.teams,
+        "pctile": round(pct * 100), "my_value": round(val[my], 1),
+        "league_avg": round(sum(val.values()) / cfg.teams, 1),
+        "my_counts": dict(cnt[my]), "best_pick": best[my],
+    }
+
+
 def _reason(p: dict, cow: dict, need: dict, demand: dict) -> str:
     bits = []
     if p["_surv"] < 0.40:
