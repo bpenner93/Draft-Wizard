@@ -52,7 +52,8 @@ def _load_league_presets():
 
 ALL_PRESETS = _load_league_presets()
 
-st.set_page_config(page_title="Draft Wizard", page_icon="🏈", layout="wide")
+st.set_page_config(page_title="Draft Wizard", page_icon="🏈", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(show_spinner=False)
@@ -214,6 +215,13 @@ h3.metric("Your next pick", f"{res['my_next_pick']}  ({res['picks_until_mine']} 
           if res["my_next_pick"] else "—")
 if on_clock_me:
     st.success("🟢 **You're on the clock**")
+
+# --------------------------------------------------------------------------- draft controls (always visible)
+uc = st.columns([1, 1, 4])
+if uc[0].button("↩︎ Undo", width="stretch"):
+    undo(); st.rerun()
+if uc[1].button("🗑 Reset draft", width="stretch"):
+    ss.drafted = []; ss.pop("plan", None); st.rerun()
 
 # --------------------------------------------------------------------------- practice controls
 if st.session_state.get("practice"):
