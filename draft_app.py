@@ -200,8 +200,30 @@ with st.sidebar:
     if st.button("↩︎ Undo last pick", width="stretch"):
         undo(); st.rerun()
     if st.button("🗑 Reset draft", width="stretch"):
-        ss.drafted = []; st.rerun()
+        ss.drafted = []; ss.pop("plan", None); ss["started"] = False; st.rerun()
 
+
+# --------------------------------------------------------------------------- start gate
+ss.setdefault("started", False)
+if not ss["started"]:
+    st.title("🏈 Draft Wizard")
+    _sf = " Superflex" if cfg.superflex else ""
+    _summ = f"**{mode}** · {cfg.teams}-team {cfg.scoring.upper()}{_sf} · your slot **{cfg.my_slot}**"
+    if rookie_mode:
+        _summ += f" · {cfg.total_rounds()} rounds"
+    if ss.get("practice"):
+        _summ += " · 🎮 practice (AI drafts the other teams)"
+    st.info(_summ)
+    if st.button("▶ Start draft", type="primary", width="stretch"):
+        ss.drafted = []
+        ss.pop("plan", None)
+        if ss.get("practice"):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+        ss["started"] = True
+        st.rerun()
+    st.caption("Set your league, strategy, slot, and Redraft/Rookie + Practice in the sidebar "
+               "(☰ top-left), then hit Start.")
+    st.stop()
 
 # --------------------------------------------------------------------------- analyze
 res = analyze(working, cfg, ss.drafted)
@@ -221,7 +243,7 @@ uc = st.columns([1, 1, 4])
 if uc[0].button("↩︎ Undo", width="stretch"):
     undo(); st.rerun()
 if uc[1].button("🗑 Reset draft", width="stretch"):
-    ss.drafted = []; ss.pop("plan", None); st.rerun()
+    ss.drafted = []; ss.pop("plan", None); ss["started"] = False; st.rerun()
 
 # --------------------------------------------------------------------------- practice controls
 if st.session_state.get("practice"):
