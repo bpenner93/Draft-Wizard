@@ -24,6 +24,8 @@ from draft_engine import (load_board, LeagueConfig, analyze, plan_draft,   # noq
                           ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance,
                           team_on_clock, grade_draft)
 from draft_names import norm_name, pos_norm                          # noqa: E402
+from draft_news import (fetch_news, player_status, apply_status,     # noqa: E402
+                        items_for_player, player_ids_in_news, ago)
 
 # quick-league presets (the main axes; roster stays standard, your slot is separate)
 PRESETS = {
@@ -59,6 +61,19 @@ st.set_page_config(page_title="Draft Wizard", page_icon="🏈", layout="wide",
 @st.cache_data(show_spinner=False)
 def get_board():
     return load_board()
+
+
+@st.cache_data(ttl=600, show_spinner="📰 Loading NFL beat feed (team writers)…")
+def get_news():
+    """All-team beat-writer feed (Google News per team) + national outlets,
+    tagged to the board. Cached 10 min; the sidebar's Refresh clears it."""
+    from draft_news import SOURCES, team_sources
+    return fetch_news(get_board(), sources=SOURCES + team_sources())
+
+
+def get_source_health():
+    from draft_news import SOURCES, team_sources, check_sources
+    return check_sources(SOURCES + team_sources())
 
 
 def build_rookie_board(board):
@@ -197,6 +212,20 @@ with st.sidebar:
             st.error(f"Sync failed: {e}")
 
     st.divider()
+    st.subheader("📰 NFL beat feed")
+    ss.setdefault("feed_on", True)
+    ss.setdefault("feed_influence", True)
+    st.checkbox("Show beat feed", key="feed_on",
+                help="Team beat-writer reporting (free Google News per team) + ESPN/CBS/Yahoo/PFT, "
+                     "tagged to your board.")
+    st.checkbox("Apply signals to picks", key="feed_influence",
+                help="Injuries, IR, benchings and role changes adjust VOR and the recommendation. "
+                     "Turn off for display-only.")
+    if st.button("🔄 Refresh feed", width="stretch"):
+        get_news.clear(); st.rerun()
+    st.caption("Signals: ⛔OUT/🔴IR/🟡questionable/↩︎returning · ⬆︎starter/⬇︎benched/↕︎backup.")
+
+    st.divider()
     if st.button("↩︎ Undo last pick", width="stretch"):
         undo(); st.rerun()
     if st.button("🗑 Reset draft", width="stretch"):
@@ -225,6 +254,21 @@ if not ss["started"]:
                "(☰ top-left), then hit Start.")
     st.stop()
 
+# --------------------------------------------------------------------------- beat feed + signals
+news = {"items": [], "errors": [], "fetched_at": 0}
+status = {}
+feed_changes = []
+if ss.get("feed_on"):
+    try:
+        news = get_news()
+    except Exception as e:
+        st.warning(f"📰 Beat feed unavailable right now: {e}")
+    status = player_status(news)
+    if ss.get("feed_influence") and status:
+        working, feed_changes = apply_status(working, status)   # scale VOR by injury/role
+        by_id = {p["id"]: p for p in working}
+news_player_ids = player_ids_in_news(news)
+
 # --------------------------------------------------------------------------- analyze
 res = analyze(working, cfg, ss.drafted)
 on_clock_me = res["on_clock"] == cfg.my_slot
@@ -237,6 +281,10 @@ h3.metric("Your next pick", f"{res['my_next_pick']}  ({res['picks_until_mine']} 
           if res["my_next_pick"] else "—")
 if on_clock_me:
     st.success("🟢 **You're on the clock**")
+if feed_changes:
+    _summ = ", ".join(f"{c['name'].split()[-1]} {c['label']} ×{c['factor']}" for c in feed_changes[:6])
+    st.caption(f"📰 Beat-feed adjustments applied to {len(feed_changes)} player(s): {_summ}"
+               + (" …" if len(feed_changes) > 6 else ""))
 
 # --------------------------------------------------------------------------- draft controls (always visible)
 uc = st.columns([1, 1, 4])
@@ -280,6 +328,11 @@ if rec:
         f"**VOR {rec['vor']}**  ·  Tier {rec['pos']}T{rec['tier']} ({rec['tier_left']} left in tier)  ·  "
         f"survives to your pick **{surv:.0f}%**\n\n"
         f"➡︎ _{rec['reason']}_")
+    _rs = status.get(rec["id"])
+    if _rs and _rs.get("label"):
+        _src = _rs.get("byline") or _rs.get("source") or ""
+        box.warning(f"📰 **{_rs['label']}** — {_rs['title']} "
+                    f"({_src} · {ago(_rs.get('published'))})", icon="⚠️")
     if on_clock_me:
         b1, b2 = box.columns([1, 3])
         if b1.button(f"✅ Draft {rec['name'].split()[-1]}", width="stretch", type="primary"):
@@ -325,6 +378,71 @@ with st.expander("📋 Draft plan — simulate the rest of your draft"):
         } for p in plan["picks"][:12]]
         st.dataframe(pd.DataFrame(prows), hide_index=True, width="stretch")
 
+# --------------------------------------------------------------------------- beat feed panel
+if ss.get("feed_on"):
+    _errs = news.get("errors", [])
+    _n = len(news.get("items", []))
+    with st.expander(f"📰 NFL beat feed — {_n} items"
+                     + (f" · {len(_errs)} sources down" if _errs else ""), expanded=False):
+        drafted_set = set(ss.drafted)
+        my_ids = {p["id"] for p in res["my_roster"]}
+        undrafted_ids = {p["id"] for p in working if p["id"] not in drafted_set}
+        view = st.radio("Show", ["Draftable", "Signals only", "My roster", "Everything"],
+                        horizontal=True, key="feed_view",
+                        help="Draftable = news about players still on the board.")
+
+        def _keep(it):
+            pids = it.get("player_ids", [])
+            if view == "Everything":
+                return True
+            if view == "My roster":
+                return any(pid in my_ids for pid in pids)
+            if view == "Signals only":
+                return any(pid in status for pid in pids)
+            return any(pid in undrafted_ids for pid in pids)   # Draftable
+
+        shown = 0
+        for it in news.get("items", []):
+            if not _keep(it):
+                continue
+            shown += 1
+            if shown > 40:
+                break
+            tags = []
+            for pid in it.get("player_ids", [])[:4]:
+                p = by_id.get(pid) or {}
+                nm = p.get("name", "")
+                sl = status.get(pid, {}).get("label", "")
+                tags.append(f"**{nm}**" + (f" _{sl}_" if sl else ""))
+            src = it.get("byline") or it.get("source") or ""
+            team = f" · {it['team']}" if it.get("team") else ""
+            when = ago(it.get("published"))
+            head = f"[{it['title']}]({it['url']})" if it.get("url") else it["title"]
+            st.markdown(f"**{when}** — {head}")
+            meta = f"<small>{src}{team}" + (" · " + " · ".join(tags) if tags else "") + "</small>"
+            st.markdown(meta, unsafe_allow_html=True)
+        if shown == 0:
+            st.caption("No matching items. Try 'Everything', or Refresh feed in the sidebar.")
+
+        st.divider()
+        st.caption("🩺 **Source health** — run this on your live deployment to see which feeds are up.")
+        if st.button("Check sources"):
+            with st.spinner("Pinging feeds…"):
+                ss["src_health"] = get_source_health()
+        health = ss.get("src_health")
+        if health:
+            up = sum(1 for r in health if r["ok"])
+            st.caption(f"{up}/{len(health)} sources up · "
+                       f"{sum(r['count'] for r in health)} items · "
+                       f"median {int(np.median([r['ms'] for r in health]))}ms")
+            hrows = [{"Source": r["name"], "Team": r.get("team") or "—",
+                      "OK": "✅" if r["ok"] else "❌", "Items": r["count"],
+                      "ms": r["ms"], "Error": (r["error"] or "")[:60]} for r in health]
+            st.dataframe(pd.DataFrame(hrows), hide_index=True, width="stretch", height=300)
+    if _errs:
+        st.caption("Sources currently down: " + ", ".join(e[0] for e in _errs[:8])
+                   + (" …" if len(_errs) > 8 else ""))
+
 st.divider()
 
 # --------------------------------------------------------------------------- main columns
@@ -334,8 +452,11 @@ with left:
     st.subheader("Best available")
     rows = []
     for p in res["best_available"][:40]:
+        _st = status.get(p["id"])
+        _news = _st["label"] if _st and _st.get("label") else ("📰" if p["id"] in news_player_ids else "")
         rows.append({
             "Player": p["name"], "Pos": f"{p['pos']}{p['posrank']}", "Tm": p.get("team"),
+            "News": _news,
             "VOR": p["vor"], "Tier": f"{p['pos']}T{p['tier']}" if p.get("tier") else "",
             "Surv%": round((p.get("survival") or 1) * 100),
             "ADP": p.get("adp"), "CoW": p.get("cost_of_waiting"),

@@ -8,6 +8,7 @@ drafted and it recomputes, after every pick:
 - **Survival odds** — Monte-Carlo P(a player is still there at your next pick)
 - **Draft-now-vs-wait** — the player whose value you'd lose by waiting × your roster need
 - **Opponent reads** — each team's roster shape and likely position runs before your pick
+- **NFL beat feed** — our own free, no-API-key news feed (see below)
 
 Works for **Sleeper** (auto-sync picks), **ESPN**, and **in-person** drafts
 (manual mark-off). Built on a consensus board = our projection model + Waldman
@@ -21,8 +22,9 @@ streamlit run draft_app.py
 
 ## Use on your phone (Streamlit Community Cloud — free)
 1. Put **this `draft_wizard/` folder** in its own GitHub repo (it's self-contained:
-   `draft_app.py`, `draft_engine.py`, `draft_names.py`, `data/draft_board.json`,
-   `requirements.txt`). Do **not** add the rest of the projection pipeline.
+   `draft_app.py`, `draft_engine.py`, `draft_names.py`, `draft_news.py`,
+   `data/draft_board.json`, `requirements.txt`). Do **not** add the rest of the
+   projection pipeline.
 2. Go to <https://share.streamlit.io> → **New app** → pick the repo →
    main file `draft_app.py` → **Deploy**.
 3. Open the resulting `https://…streamlit.app` URL on your phone. Bookmark it.
@@ -41,6 +43,44 @@ python consensus.py           # blend ours + Waldman + Clay ECR + ADP
 python export_draft_board.py  # -> draft_wizard/data/draft_board.json
 ```
 Commit the refreshed `draft_board.json` to the app repo to update the phone app.
+
+## NFL beat feed (`draft_news.py`)
+Our own news feed — **free, no API key**, runs fine on Streamlit Cloud. Instead of
+paying for the X/Twitter API where individual beat writers post, we aggregate the
+public feeds that carry their reporting and tag every headline to a player on your
+board.
+
+Sources (each fetched independently; one dead feed never breaks the rest):
+- **Per-team beat writers** — a **Google News RSS** search per team (all 32),
+  biased toward roster news (injuries, practice, depth chart, starters). This is
+  what surfaces The Athletic, local-paper beat reporters, PFF, team sites, etc.
+- **National** — ESPN (JSON + RSS), ProFootballTalk, CBS Sports, Yahoo Sports.
+
+What it does during a draft:
+- **Player tagging** — matches headlines to the board by name (full name >
+  unambiguous "F. Last" > unique surname; a team's own beat feed rescues a
+  surname-only mention). Shows a 📰 marker / status badge in *Best available* and
+  next to the recommendation.
+- **Signal extraction → picks** — pulls structured signals from the text:
+  injury designation (⛔OUT / 🔴IR / 🟠doubtful / 🟡questionable / 🟡limited /
+  ↩︎returning) and depth-chart role (⬆︎starter / ⬇︎benched / ↕︎backup). With
+  **Apply signals to picks** on (sidebar), these scale the player's projection so
+  VOR, tiers, and the recommendation react — e.g. a *ruled out* stud drops off the
+  board, a *questionable* one is nudged down. Adjustments are bounded (a bad parse
+  can't zero out a healthy star) and shown in a caption so you can see exactly what
+  changed. Turn the toggle off for display-only.
+- **Source health** — the "📰 NFL beat feed" panel has a **Check sources** button
+  that pings every feed and reports up/down, item count, and latency, so you can
+  verify reliability on your live deployment. Same check on the command line:
+  ```bash
+  python draft_news.py --check     # ping sources, report health
+  python draft_news.py             # print the latest tagged headlines + signals
+  ```
+
+Notes / limits: signal extraction is keyword-based and conservative (a miss means
+"no signal", not a wrong one). **Snap counts** are post-game stat data, not
+something beat writers publish in July — those belong to an in-season stats feed
+(e.g. nflverse) and are a natural follow-up to layer on the same status surface.
 
 ## Tuning the pick logic
 The recommendation knobs live at the top of `draft_engine.py`:
