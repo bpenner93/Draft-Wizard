@@ -80,6 +80,18 @@ def build_rookie_board(board):
     return rb
 
 
+def revalue_rookies(rb, superflex):
+    """Re-rank the rookie board by the DynastyProcess market value that matches the
+    league type -- 1QB value (dp1) for single-QB, superflex value (dp2) for SF -- and
+    rebuild the pseudo rookie-ADP. In 1QB a top rookie QB (Mendoza) falls behind the
+    WRs; in SF he's a premium. Mutates in place (shared with by_id)."""
+    for q in rb:
+        primary = q.get("dp2") if superflex else q.get("dp1")
+        q["pts"] = primary or q.get("dp1") or q.get("dp2") or q.get("dyn") or q.get("pts") or 0.0
+    for i, q in enumerate(sorted(rb, key=lambda x: -(x["pts"] or 0.0)), 1):
+        q["adp"], q["adp_sd"], q["adp_sf"] = float(i), 3.0 + 0.12 * i, None
+
+
 board = get_board()
 ss = st.session_state
 ss.setdefault("drafted", [])          # ordered list of drafted player ids
@@ -248,6 +260,10 @@ with st.sidebar:
     if st.button("🗑 Reset draft", width="stretch"):
         ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None); ss["started"] = False; st.rerun()
 
+
+# rookie board: re-rank by the market value matching the league type (1QB vs superflex)
+if rookie_mode:
+    revalue_rookies(working, cfg.superflex)
 
 # --------------------------------------------------------------------------- start gate
 ss.setdefault("started", False)
