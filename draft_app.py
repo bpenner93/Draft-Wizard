@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from draft_engine import (load_board, LeagueConfig, analyze, plan_draft,   # noqa: E402
                           ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance,
                           team_on_clock, grade_draft)
+from draft_board import draft_board_html   # noqa: E402
 from draft_names import norm_name, pos_norm                          # noqa: E402
 
 # quick-league presets (the main axes; roster stays standard, your slot is separate)
@@ -107,21 +108,15 @@ def undo():
 SLEEPER_USER_ID = "430840397841838080"   # PennerBoy -- auto-detect your draft slot from draft_order
 
 
-def sleeper_sync(draft_id: str):
-    """Pull picks AND draft config (snake vs linear + your slot) straight from Sleeper."""
-    import requests
-    did = draft_id.strip()
-    d = requests.get(f"https://api.sleeper.app/v1/draft/{did}", timeout=15).json()
-    settings = d.get("settings") or {}
-    order = d.get("draft_order") or {}
-    ci = {"type": d.get("type"), "snake": (d.get("type") == "snake"),
-          "teams": settings.get("teams"), "rounds": settings.get("rounds"),
-          "my_slot": order.get(SLEEPER_USER_ID)}
-    r = requests.get(f"https://api.sleeper.app/v1/draft/{did}/picks", timeout=15)
-    r.raise_for_status()
-    picks = sorted(r.json(), key=lambda x: x.get("pick_no", 0))
+def sleeper_sync(draft_id: str = None, league_id: str = None):
+    """Pull picks + config (type->snake, your slot) + board metadata (team names,
+    traded picks) from Sleeper. Accepts a draft_id OR a league_id."""
+    from sleeper_api import league_state
+    stt = league_state(league_id=league_id, draft_id=(draft_id or "").strip() or None)
+    ci = {"type": stt["type"], "snake": stt["snake"], "teams": stt["teams"],
+          "rounds": stt["rounds"], "my_slot": stt["my_slot"]}
     drafted, matched, missed = [], [], []
-    for pk in picks:
+    for pk in stt["picks"]:
         m = pk.get("metadata") or {}
         nm = f"{m.get('first_name','')} {m.get('last_name','')}".strip()
         pos = pos_norm(m.get("position"))
@@ -135,6 +130,7 @@ def sleeper_sync(draft_id: str):
             missed.append(f"{nm} ({pos})")
     ss.drafted = drafted
     ss["sleeper_cfg"] = ci
+    ss["sleeper_state"] = stt
     return len(matched), missed, ci
 
 
@@ -143,6 +139,9 @@ def do_pick(pid):
     draft_ids([pid])
     if st.session_state.get("practice"):
         ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
+
+
+# draft_board_html lives in draft_board.py (imported at top) -- pure + headless-testable
 
 
 # --------------------------------------------------------------------------- sidebar: league
@@ -218,24 +217,36 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🔄 Sleeper live-sync")
-    did = st.text_input("Draft ID", help="From your Sleeper draft URL: sleeper.com/draft/nfl/<DRAFT_ID>")
-    if st.button("Pull picks from Sleeper", width="stretch") and did:
+    _sl = {p["name"]: p["league_id"] for p in ALL_PRESETS.values()
+           if p.get("source") == "sleeper" and p.get("league_id")}
+    lg = st.selectbox("My Sleeper leagues", ["—"] + list(_sl),
+                      help="Loads that league's current draft automatically — no draft ID needed.")
+    if st.button("📲 Load this league's draft", width="stretch", type="primary") and lg != "—":
         try:
-            n, missed, ci = sleeper_sync(did)
+            n, missed, ci = sleeper_sync(league_id=_sl[lg])
             ss["started"] = True
-            slot_txt = f" · your slot {ci['my_slot']}" if ci.get("my_slot") else ""
-            st.success(f"Synced {n} picks · {ci.get('type', '?')}{slot_txt}")
+            st.success(f"{lg}: {n} picks · {ci.get('type', '?')} · slot {ci.get('my_slot', '?')}")
             if missed:
-                st.caption("Unmatched: " + ", ".join(missed[:8]))
+                st.caption("Unmatched (IDP/UDFA): " + ", ".join(missed[:6]))
             st.rerun()
         except Exception as e:
-            st.error(f"Sync failed: {e}")
+            st.error(f"Load failed: {e}")
+    with st.expander("…or paste a Draft ID"):
+        did = st.text_input("Draft ID", help="sleeper.com/draft/nfl/<DRAFT_ID>")
+        if st.button("Pull picks", width="stretch") and did:
+            try:
+                n, missed, ci = sleeper_sync(draft_id=did)
+                ss["started"] = True
+                st.success(f"Synced {n} picks · {ci.get('type', '?')}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Sync failed: {e}")
 
     st.divider()
     if st.button("↩︎ Undo last pick", width="stretch"):
         undo(); st.rerun()
     if st.button("🗑 Reset draft", width="stretch"):
-        ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss["started"] = False; st.rerun()
+        ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None); ss["started"] = False; st.rerun()
 
 
 # --------------------------------------------------------------------------- start gate
@@ -278,7 +289,7 @@ uc = st.columns([1, 1, 4])
 if uc[0].button("↩︎ Undo", width="stretch"):
     undo(); st.rerun()
 if uc[1].button("🗑 Reset draft", width="stretch"):
-    ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss["started"] = False; st.rerun()
+    ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None); ss["started"] = False; st.rerun()
 
 # --------------------------------------------------------------------------- practice controls
 if st.session_state.get("practice"):
@@ -335,6 +346,13 @@ if rec:
     for i, a in enumerate(res["best_available"][:5]):
         if chips[i].button(f"{a['name'].split()[-1]} {a['pos']}", key=f"chip_{i}", width="stretch"):
             do_pick(a["id"]); st.rerun()
+
+# --------------------------------------------------------------------------- draft board
+with st.expander("🗺️ Draft Board — all teams, picks & trades"):
+    st.markdown(draft_board_html(cfg, ss.get("sleeper_state"), ss.drafted, by_id),
+                unsafe_allow_html=True)
+    st.caption("Colored = drafted (by position) · ★ column = you · orange outline = on the clock"
+               + (" · ⇄ = traded pick (now the tagged team's)" if ss.get("sleeper_state") else ""))
 
 # manual mark-off (search anyone)
 undrafted = [p for p in working if p["id"] not in set(ss.drafted)]
