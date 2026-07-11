@@ -104,21 +104,38 @@ def undo():
         ss.drafted.pop()
 
 
+SLEEPER_USER_ID = "430840397841838080"   # PennerBoy -- auto-detect your draft slot from draft_order
+
+
 def sleeper_sync(draft_id: str):
+    """Pull picks AND draft config (snake vs linear + your slot) straight from Sleeper."""
     import requests
-    url = f"https://api.sleeper.app/v1/draft/{draft_id.strip()}/picks"
-    r = requests.get(url, timeout=15)
+    did = draft_id.strip()
+    d = requests.get(f"https://api.sleeper.app/v1/draft/{did}", timeout=15).json()
+    settings = d.get("settings") or {}
+    order = d.get("draft_order") or {}
+    ci = {"type": d.get("type"), "snake": (d.get("type") == "snake"),
+          "teams": settings.get("teams"), "rounds": settings.get("rounds"),
+          "my_slot": order.get(SLEEPER_USER_ID)}
+    r = requests.get(f"https://api.sleeper.app/v1/draft/{did}/picks", timeout=15)
     r.raise_for_status()
     picks = sorted(r.json(), key=lambda x: x.get("pick_no", 0))
-    matched, missed = [], []
+    drafted, matched, missed = [], [], []
     for pk in picks:
         m = pk.get("metadata") or {}
         nm = f"{m.get('first_name','')} {m.get('last_name','')}".strip()
         pos = pos_norm(m.get("position"))
         pid = key_map.get((norm_name(nm), pos))
-        (matched.append(pid) if pid else missed.append(f"{nm} ({pos})"))
-    ss.drafted = [p for p in matched if p]
-    return len(matched), missed
+        if pid:
+            drafted.append(pid); matched.append(pid)
+        else:
+            # keep the slot occupied so pick numbers / whose-turn stay aligned (e.g. IDP
+            # picks our offense-only board doesn't carry)
+            drafted.append(f"__off_{pk.get('pick_no')}")
+            missed.append(f"{nm} ({pos})")
+    ss.drafted = drafted
+    ss["sleeper_cfg"] = ci
+    return len(matched), missed, ci
 
 
 def do_pick(pid):
@@ -174,25 +191,43 @@ with st.sidebar:
         if rookie_mode:
             cfg = LeagueConfig(teams=int(P["teams"]), scoring="ppr", superflex=P.get("superflex", False),
                                starters=st_p, bench=int(P.get("bench", bench)), my_slot=slot_p,
-                               snake=not r_linear, rounds=int(P.get("rounds", r_rounds)), archetype="value")
+                               snake=P.get("snake", not r_linear), rounds=int(P.get("rounds", r_rounds)), archetype="value")
         else:
             cfg = LeagueConfig(teams=int(P["teams"]), scoring=P.get("scoring", "ppr"),
                                superflex=P.get("superflex", False), starters=st_p,
-                               bench=int(P.get("bench", bench)), my_slot=slot_p, archetype=archetype)
+                               bench=int(P.get("bench", bench)), my_slot=slot_p,
+                               snake=P.get("snake", True), archetype=archetype)
         if P.get("kind") == "rookie" and not rookie_mode:
             st.info("Dynasty rookie league — set **Draft type → Rookie** at the top.")
         elif P.get("kind") == "redraft" and rookie_mode:
             st.info("Redraft league — set **Draft type → Redraft** at the top.")
+
+    # Sleeper live-sync auto-config wins (authoritative draft type + your slot)
+    _sc = ss.get("sleeper_cfg")
+    if _sc:
+        if _sc.get("snake") is not None:
+            cfg.snake = bool(_sc["snake"])
+        if _sc.get("my_slot"):
+            cfg.my_slot = int(_sc["my_slot"])
+        if _sc.get("teams"):
+            cfg.teams = int(_sc["teams"])
+        if rookie_mode and _sc.get("rounds"):
+            cfg.rounds = int(_sc["rounds"])
+        st.caption(f"📲 Sleeper: {_sc.get('type', '?')} · your slot {cfg.my_slot}"
+                   + (f" · {cfg.rounds} rds" if rookie_mode and cfg.rounds else ""))
 
     st.divider()
     st.subheader("🔄 Sleeper live-sync")
     did = st.text_input("Draft ID", help="From your Sleeper draft URL: sleeper.com/draft/nfl/<DRAFT_ID>")
     if st.button("Pull picks from Sleeper", width="stretch") and did:
         try:
-            n, missed = sleeper_sync(did)
-            st.success(f"Synced {n} picks.")
+            n, missed, ci = sleeper_sync(did)
+            ss["started"] = True
+            slot_txt = f" · your slot {ci['my_slot']}" if ci.get("my_slot") else ""
+            st.success(f"Synced {n} picks · {ci.get('type', '?')}{slot_txt}")
             if missed:
                 st.caption("Unmatched: " + ", ".join(missed[:8]))
+            st.rerun()
         except Exception as e:
             st.error(f"Sync failed: {e}")
 
@@ -200,7 +235,7 @@ with st.sidebar:
     if st.button("↩︎ Undo last pick", width="stretch"):
         undo(); st.rerun()
     if st.button("🗑 Reset draft", width="stretch"):
-        ss.drafted = []; ss.pop("plan", None); ss["started"] = False; st.rerun()
+        ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss["started"] = False; st.rerun()
 
 
 # --------------------------------------------------------------------------- start gate
@@ -243,7 +278,7 @@ uc = st.columns([1, 1, 4])
 if uc[0].button("↩︎ Undo", width="stretch"):
     undo(); st.rerun()
 if uc[1].button("🗑 Reset draft", width="stretch"):
-    ss.drafted = []; ss.pop("plan", None); ss["started"] = False; st.rerun()
+    ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss["started"] = False; st.rerun()
 
 # --------------------------------------------------------------------------- practice controls
 if st.session_state.get("practice"):
