@@ -36,17 +36,24 @@ st.caption(f"Season {meta.get('season', '?')} · {meta.get('n_players', 0)} play
            f"ECR = Clay/Boone/Walter, market = FFC ADP")
 
 df = pd.DataFrame(players)
-for c in ("pts", "adp", "ecr", "our_rank", "clay", "floor", "ceil", "age"):
+for c in ("pts", "adp", "ecr", "our_rank", "clay", "walt", "walt_pts", "floor", "ceil",
+          "age", "rank", "pos_rank", "vor"):
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 df = df[df["pts"].notna()].copy()
-df["ovr"] = df["pts"].rank(ascending=False, method="min").astype(int)
+# Draft order = VALUE OVER REPLACEMENT (exported `rank`), NOT raw points -- raw points
+# floods the top with QBs (they score most but go rounds later). Fall back to a pts
+# rank only for older boards that predate the vor export.
+if "rank" in df.columns and df["rank"].notna().any():
+    df["ovr"] = df["rank"].fillna(df["pts"].rank(ascending=False, method="min")).astype(int)
+else:
+    df["ovr"] = df["pts"].rank(ascending=False, method="min").astype(int)
 df["adp_edge"] = df["adp"] - df["ovr"]          # positive = market lets him slide past our value
 
 c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1.4])
 pos = c1.radio("Position", ["All", "QB", "RB", "WR", "TE", "K", "DST"], horizontal=True)
 rookies = c2.toggle("Rookies only")
-sort_by = c3.selectbox("Sort", ["Our points", "ADP", "ECR"])
+sort_by = c3.selectbox("Sort", ["Draft value (VOR)", "ADP", "ECR", "Projected points"])
 search = c4.text_input("Search", placeholder="player name…")
 
 v = df
@@ -56,8 +63,8 @@ if rookies:
     v = v[v.get("rookie", False) == True]        # noqa: E712
 if search.strip():
     v = v[v["name"].str.contains(search.strip(), case=False, na=False)]
-v = v.sort_values({"Our points": "ovr", "ADP": "adp", "ECR": "ecr"}[sort_by],
-                  na_position="last")
+sort_key = {"Draft value (VOR)": "ovr", "ADP": "adp", "ECR": "ecr", "Projected points": "pts"}[sort_by]
+v = v.sort_values(sort_key, ascending=(sort_key != "pts"), na_position="last")
 
 def _flag(r):
     e = r.get("adp_edge")
@@ -83,8 +90,8 @@ show = v[["ovr", "flag", "name", "pos", "team", "pts", "our_rank", "clay", "walt
 st.dataframe(
     show, hide_index=True, height=620,
     column_config={
-        "#": st.column_config.NumberColumn(width="small"),
-        "Pts": st.column_config.NumberColumn(format="%.0f", help="Consensus season PPR points"),
+        "#": st.column_config.NumberColumn(width="small", help="Overall draft rank by value over replacement (PPR, 1QB)"),
+        "Pts": st.column_config.NumberColumn(format="%.0f", help="Consensus season PPR points (raw total — QBs score most, which is why draft order uses VOR, not this)"),
         "Our": st.column_config.NumberColumn(width="small", help="Our positional rank"),
         "Clay": st.column_config.NumberColumn(width="small", help="Mike Clay positional rank"),
         "Walt": st.column_config.NumberColumn(width="small", help="WalterFootball positional rank"),
