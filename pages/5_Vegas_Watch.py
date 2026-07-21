@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT))
 from weekly_data import (BUNDLE, load_bundle, players_df, games_df,   # noqa: E402
                          fetch_espn_lines, line_moves, team_imp_moves)
 
-st.set_page_config(page_title="Vegas Watch", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Vegas Watch", page_icon="📈", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(show_spinner=False)

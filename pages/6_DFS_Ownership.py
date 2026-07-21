@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT))
 from weekly_data import (BUNDLE, load_bundle, players_df,          # noqa: E402
                          slate_options, filter_slate, SLATE_LABEL)
 
-st.set_page_config(page_title="DFS Ownership", page_icon="🫧", layout="wide")
+st.set_page_config(page_title="DFS Ownership", page_icon="🫧", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(show_spinner=False)

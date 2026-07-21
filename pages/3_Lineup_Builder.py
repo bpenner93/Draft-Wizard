@@ -20,7 +20,8 @@ from weekly_data import (BUNDLE, load_bundle, players_df,          # noqa: E402
                          slate_options, filter_slate, SLATE_LABEL)
 import lineup_opt as LO                                            # noqa: E402
 
-st.set_page_config(page_title="Lineup Builder", page_icon="🧱", layout="wide")
+st.set_page_config(page_title="Lineup Builder", page_icon="🧱", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(show_spinner=False)

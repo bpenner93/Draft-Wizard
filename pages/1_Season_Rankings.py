@@ -18,7 +18,8 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-st.set_page_config(page_title="Season Rankings", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Season Rankings", page_icon="📊", layout="wide",
+                   initial_sidebar_state="expanded")
 
 BOARD = ROOT / "data" / "draft_board.json"
 

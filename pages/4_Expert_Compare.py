@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 from weekly_data import BUNDLE, load_bundle, players_df       # noqa: E402
 import expert_parse as EP                                     # noqa: E402
 
-st.set_page_config(page_title="Expert Compare", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Expert Compare", page_icon="🔍", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(show_spinner=False)
