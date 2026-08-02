@@ -93,13 +93,21 @@ ADV_PANEL = {
            ("final_recyd_share", "Final yds share", "{:.3f}", ""),
            ("best_rectd_share", "Best rec TD share", "{:.3f}", ""),
            ("final_reci_ypr", "Yards / reception", "{:.1f}", ""),
-           ("pff_car_yprr", "Yards / route run", "{:.2f}", "PFF, real routes"),
+           # ADVANCED DATA, ordered to match the real card. `max` rows are the
+           # best SEASON by rate (100-route floor); `career` rows are
+           # route-weighted so a cameo cannot drag them.
+           ("pff_max_yprr", "Max yards / route run", "{:.2f}", "PFF, best season"),
+           ("pff_car_yprr", "Career yards / route run", "{:.2f}", "PFF, real routes"),
+           ("pff_car_fdpr", "First downs / route run", "{:.3f}", "PFF"),
            ("pff_car_tprr", "Targets / route run", "{:.3f}", "PFF"),
-           ("pff_car_adot", "aDOT", "{:.1f}", "PFF"),
            ("pff_car_slot", "Slot rate", "{:.1f}%", "PFF, share of pass plays"),
+           ("pff_max_tgt_share", "Max target share", "{:.1f}%",
+            "PFF; denominator is targets to route-runners"),
+           ("pff_car_ctgt", "Contested targets", "{:.2f}", "PFF, share of targets"),
            ("pff_car_ccr", "Contested catch rate", "{:.1f}%", "PFF"),
            ("pff_car_yacpr", "YAC / reception", "{:.1f}", "PFF"),
            ("pff_car_avoided", "Avoided tackles / rec", "{:.2f}", "PFF"),
+           ("pff_car_adot", "Career aDOT", "{:.1f}", "PFF"),
            ("pff_car_grade_route", "PFF route grade", "{:.1f}", "PFF"),
            ("best_fd_per_tmpa", "1st downs / team pass att", "{:.3f}",
             "free fallback -- covers the ~15% PFF's FBS pull misses"),
