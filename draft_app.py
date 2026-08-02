@@ -62,6 +62,22 @@ def get_board():
     return load_board()
 
 
+def arc_flag(p) -> str:
+    """Compact signal for the board. A HIGH percentile means we are projecting
+    ABOVE what comparable players actually did -- a caution, not praise.
+
+    Reads the `arc` field baked into draft_board.json by export_draft_board.py.
+    Deliberately NOT computed at runtime: the phone app is a standalone repo and
+    cannot import player_history or reach data/player_history.db."""
+    if p is None or (isinstance(p, float) and pd.isna(p)):
+        return ""
+    if p >= 85:
+        return f"! {int(p)}"
+    if p <= 20:
+        return f"+ {int(p)}"
+    return str(int(p))
+
+
 def build_rookie_board(board):
     """Rookie-draft view: rookies only, valued by the REAL dynasty market
     (DynastyProcess superflex value) when available, else our dynasty value.
@@ -408,13 +424,28 @@ with left:
             "VOR": p["vor"], "Tier": f"{p['pos']}T{p['tier']}" if p.get("tier") else "",
             "Surv%": round((p.get("survival") or 1) * 100),
             "ADP": p.get("adp"), "CoW": p.get("cost_of_waiting"),
+            # Arc  = where OUR projection sits inside the comp distribution
+            # Decl% = share of those comps who fell off >25% the next year
+            # Both are needed: at the top of the board almost everyone reads high
+            # on Arc (we project elite production, comps regress), so Arc alone
+            # does not discriminate. Lamb is 90th with 5% declining; McCaffrey is
+            # 100th with 100% declining. The pair is the signal.
+            "Arc": arc_flag(p.get("arc")),
+            "Decl%": p.get("decl"),
         })
     df = pd.DataFrame(rows)
     sty = (df.style
            .background_gradient(subset=["VOR"], cmap="Greens")
            .background_gradient(subset=["Surv%"], cmap="RdYlGn")
-           .format({"VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}", "Surv%": "{:.0f}"}, na_rep="—"))
+           .format({"VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}", "Surv%": "{:.0f}", "Decl%": "{:.0f}"}, na_rep="—"))
     st.dataframe(sty, width="stretch", hide_index=True, height=560)
+    st.caption(
+        "**Arc** = where our projection sits in the distribution of what comparable "
+        "players did NEXT (same position, same career year, similar draft pedigree "
+        "and record up to that point). `!` = we project above almost all of them; "
+        "`+` = below most. **Decl%** = share of those comps who fell off >25%. "
+        "Read them together: near the top of the board nearly everyone reads high on "
+        "Arc, so Decl% is what separates an aggressive projection from a risky one.")
 
 with right:
     if ss.drafted:

@@ -692,7 +692,9 @@ def _reason(p: dict, cow: dict, need: dict, demand: dict) -> str:
 def _slim(p: dict, full: bool = False) -> dict:
     out = {"id": p["id"], "name": p.get("name"), "pos": p["pos"], "team": p.get("team"),
            "posrank": p.get("_posrank"), "vor": p.get("_vor"), "pts": p.get("_pts"),
-           "tier": p.get("_tier"), "adp": p.get("adp"), "rookie": p.get("rookie")}
+           "tier": p.get("_tier"), "adp": p.get("adp"), "rookie": p.get("rookie"),
+           # career-arc comps, baked into draft_board.json by export_draft_board
+           "arc": p.get("arc"), "decl": p.get("decl")}
     if full:
         out.update({"survival": p.get("_surv"), "cost_of_waiting": p.get("_cow"),
                     "rec_score": p.get("_rec_score"), "ecr": p.get("ecr"), "clay": p.get("clay"),
