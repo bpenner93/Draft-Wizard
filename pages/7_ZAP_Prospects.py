@@ -112,6 +112,12 @@ ADV_PANEL = {
            ("tm_pass_att_final", "Team pass attempts", "{:.0f}",
             "context for every per-team-pass-att rate above -- a low-volume "
             "offence inflates them"),
+           ("tmate_routes_peak", "Teammate routes (peak yr)", "{:.0f}",
+            "how much competition for targets he faced -- a WR model feature"),
+           ("tmate_best_grade_peak", "Best teammate route grade", "{:.1f}",
+            "context only: explains a suppressed target share, but it LOST the "
+            "gate as a feature"),
+           ("tmate_n_good_peak", "Teammates grading 75+", "{:.0f}", "context only"),
            ("best_fd_per_tmpa", "1st downs / team pass att", "{:.3f}",
             "free fallback -- covers the ~15% PFF's FBS pull misses"),
            ("best_explosive_per_tmpa", "20+ yd catches / team pass att", "{:.3f}", ""),
