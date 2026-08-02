@@ -109,6 +109,9 @@ ADV_PANEL = {
            ("pff_car_avoided", "Avoided tackles / rec", "{:.2f}", "PFF"),
            ("pff_car_adot", "Career aDOT", "{:.1f}", "PFF"),
            ("pff_car_grade_route", "PFF route grade", "{:.1f}", "PFF"),
+           ("tm_pass_att_final", "Team pass attempts", "{:.0f}",
+            "context for every per-team-pass-att rate above -- a low-volume "
+            "offence inflates them"),
            ("best_fd_per_tmpa", "1st downs / team pass att", "{:.3f}",
             "free fallback -- covers the ~15% PFF's FBS pull misses"),
            ("best_explosive_per_tmpa", "20+ yd catches / team pass att", "{:.3f}", ""),
@@ -126,6 +129,9 @@ ADV_PANEL = {
            ("best_rec_share", "Best reception share", "{:.3f}",
             "⭐ the one metric that beats the pick"),
            ("final_recyd_per_tmpa", "Rec yds / team pass att", "{:.2f}", ""),
+           ("tm_pass_att_final", "Team pass attempts", "{:.0f}",
+            "context for the rate above -- an option offence throws ~150 where "
+            "the median is 399, which inflates it"),
            ("final_usage_third_down", "3rd-down usage", "{:.3f}", ""),
            ("best_ppa_avg_all", "EPA per play", "{:.3f}", ""),
            ("tot_rush_yds", "Career rush yards", "{:.0f}", ""),
