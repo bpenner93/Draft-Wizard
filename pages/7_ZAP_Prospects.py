@@ -59,6 +59,8 @@ df = load(str(SHIPPED) if SHIPPED.exists() else "", str(PARQUET), _src.stat().st
 # --------------------------------------------------------------------------
 MODEL_PANEL = {
     "WR": [("age_at_draft", "Age at draft", "{:.1f}", ""),
+           ("yrs_college", "Years in college", "{:.0f}",
+            "3 or fewer = declared with eligibility left. Context only: it LOST the gate to age_at_draft, which carries it better"),
            ("breakout_age", "Breakout age", "{:.1f}", ""),
            ("height_in", "Height (in)", "{:.0f}", ""),
            ("weight", "Weight (lbs)", "{:.0f}", ""),
@@ -68,6 +70,8 @@ MODEL_PANEL = {
            ("burst_score", "Burst score", "{:.1f}", ""),
            ("recruit_rating", "247 composite", "{:.4f}", "")],
     "RB": [("age_at_draft", "Age at draft", "{:.1f}", ""),
+           ("yrs_college", "Years in college", "{:.0f}",
+            "3 or fewer = declared with eligibility left. Context only: it LOST the gate to age_at_draft, which carries it better"),
            ("breakout_age", "Breakout age", "{:.1f}", ""),
            ("height_in", "Height (in)", "{:.0f}", ""),
            ("weight", "Weight (lbs)", "{:.0f}", ""),
@@ -77,6 +81,8 @@ MODEL_PANEL = {
            ("agility_score", "Agility score", "{:.2f}", ""),
            ("recruit_rating", "247 composite", "{:.4f}", "")],
     "QB": [("age_at_draft", "Age at draft", "{:.1f}", ""),
+           ("yrs_college", "Years in college", "{:.0f}",
+            "3 or fewer = declared with eligibility left. Context only: it LOST the gate to age_at_draft, which carries it better"),
            ("height_in", "Height (in)", "{:.0f}", ""),
            ("weight", "Weight (lbs)", "{:.0f}", ""),
            ("recruit_rating", "247 composite", "{:.4f}", "")],
