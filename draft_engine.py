@@ -40,6 +40,30 @@ SUPERFLEX_SPLIT = {"QB": 0.80, "RB": 0.05, "WR": 0.12, "TE": 0.03}
 # recommendation weights (VOR-point units) -- the knobs to tune the pick analyzer
 W_SCARCITY = 1.0    # weight on cost-of-waiting (tier cliff before your next pick)
 W_NEED     = 1.0    # weight on roster-need bonus
+# Damp cost-of-waiting by the SAME roster_factor that damps VOR.
+# ⭐ THIS IS A BUG FIX, not a preference. cost_of_waiting is POSITIONAL, so
+# without this it fires at full weight no matter how many of that position you
+# already own -- and it silently defeated roster_factor. Caught by draft_tune.py:
+# taking a 3rd TE with 2 already rostered, roster_factor(TE,2)=0.03 correctly
+# zeroed the VOR term, but cost_of_waiting[TE]=8.3 came through undamped and won
+# the pick outright. Result was 4-TE / 3-WR rosters in a 1-TE league -- exactly
+# the TE-spam roster_factor was introduced to stop.
+# The cliff at a position is only worth something to YOU in proportion to what
+# another body there is worth to your roster.
+SCARCITY_ROSTER_AWARE = True
+# ⭐ roster_factor is a MULTIPLIER, and from ~round 9 on every remaining player has
+# NEGATIVE VOR (all 100 of the players ranked 101-200 do). Multiplying a negative
+# by a small discount makes it LESS negative, so the penalty for a filled position
+# silently inverts into a REWARD:
+#     Caleb Williams    QB  VOR -11.7 x rf 0.03 (2 QBs rostered) = -0.4
+#     T. McMillan       WR  VOR -13.2 x rf 0.60 (4 WRs rostered) = -7.9
+# -> the QB you cannot start outranks the WR you can, on every bench pick.
+# This is why fixing the undamped-scarcity bug only MOVED the spam from TE to QB
+# (TE 3.7 -> 3.0 but QB 2.7 -> 3.3 average per roster).
+# Fix: a filled position must be penalised in BOTH directions -- scale positive
+# value down, scale negative value further down. (2 - rf) is bounded in [1, 2)
+# and continuous at rf = 1, so an unfilled position is unaffected.
+VOR_DISCOUNT_SYMMETRIC = True
 KDST_LATE_ROUNDS = 3   # only value K/DST when this many rounds (or fewer) remain
 RUN_STRENGTH = 0.6     # how hard a LIVE positional run bends survival off ADP (0 = pure ADP)
 RUN_MIN_PICKS = 4      # need this many picks on the board before trusting a run signal
@@ -421,9 +445,13 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         p["_need"] = round(need.get(pos, 0.0), 1)
         rf = roster_factor(cfg, pos, my_counts.get(pos, 0))
         ab = archetype_bonus(cfg.archetype, pos, my_round, my_counts, cfg)
+        scar = W_SCARCITY * max(0.0, cow.get(pos, 0.0))
+        if SCARCITY_ROSTER_AWARE:
+            scar *= rf
+        v = p["_vor"]
+        eff = (v * rf if v >= 0 else v * (2.0 - rf)) if VOR_DISCOUNT_SYMMETRIC else v * rf
         p["_rec_score"] = round(
-            p["_vor"] * rf + W_SCARCITY * max(0.0, cow.get(pos, 0.0))
-            + W_NEED * need.get(pos, 0.0) + ab, 1)
+            eff + scar + W_NEED * need.get(pos, 0.0) + ab, 1)
 
     remaining.sort(key=lambda x: -x["_rec_score"])
     best_available = sorted(remaining, key=lambda x: -x["_vor"])
