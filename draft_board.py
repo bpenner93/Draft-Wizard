@@ -75,8 +75,11 @@ def draft_board_html(cfg, state, drafted, by_id) -> str:
                     sub = "YOU"
                 else:
                     sub = ""
+                # label by the pick's real position IN the round, not by the team's
+                # seat: in a snake, seat 1 owns pick 2.12, not 2.01
+                inrnd = ((p - 1) % teams) + 1
                 body += (f'<td style="border:{brd};background:{bg};color:#64748b;padding:3px;'
-                         f'font-size:10px;line-height:1.15">{r}.{s:02d}<br>'
+                         f'font-size:10px;line-height:1.15">{r}.{inrnd:02d}<br>'
                          f'<span style="font-size:9px;color:#f59e0b">{sub}</span></td>')
         body += "</tr>"
 

@@ -64,9 +64,69 @@ SCARCITY_ROSTER_AWARE = True
 # value down, scale negative value further down. (2 - rf) is bounded in [1, 2)
 # and continuous at rf = 1, so an unfilled position is unaffected.
 VOR_DISCOUNT_SYMMETRIC = True
+# ⭐⭐ ...but multiplication STILL cannot express "another TE is worthless to me"
+# once the value being multiplied is already ~0. VOR is measured against POSITIONAL
+# replacement, so a 3rd TE sitting exactly on the TE line scores 0.0 x 0.03 = 0.00
+# and beats every usable player left -- by round 10 they are all below their own
+# replacement line. Measured at pick 139 with a WR3/RB5/TE2/QB1 roster:
+#     Hunter Henry  TE  VOR   0.0 x rf 0.03 -> eff   0.00   <- won the pick
+#     Deebo Samuel  WR  VOR -32.2 x (2-rf)  -> eff -45.08
+# Across 18 mocks that built 4.1 TE / 2.4 WR rosters in a 1-TE league.
+# VOR_DISCOUNT_SYMMETRIC fixed the mirror case (a filled position being REWARDED
+# for negative VOR) and does not help here, because the blocked player's value is
+# zero rather than negative. Any positive multiplier preserves sign, so a
+# zero-VOR blocked player outranks a negative-VOR usable one no matter the factor.
+#
+# Fix: INTERPOLATE instead of scale. rf = 1 -> the player's own VOR; rf = 0 ->
+# BLOCKED_VALUE, the score of a body you can never start. Linear in between, so it
+# is continuous at rf = 1 (an unfilled position is untouched, early rounds are
+# bit-identical), monotone in VOR, and cannot invert sign. Subsumes
+# VOR_DISCOUNT_SYMMETRIC, which is kept only so draft_tune can A/B against it.
+#
+# ✅ VALIDATED on BOTH seasons with draft_tune's paired duel (40 leagues each,
+# seats swapped, scored on real weekly points via the optimal weekly lineup):
+#     2025  +88.4 +/- 48.4  t +1.83  h2h 55%
+#     2024  +79.5 +/- 42.5  t +1.87  h2h 62%
+#     combined +83.4 +/- 31.9  t +2.61, sign consistent
+# No OOS reversal -- which is exactly what killed W_SCARCITY=2 (2025 t +3.13 ->
+# 2024 t -1.74). BLOCKED_VALUE was chosen from a ROSTER-SHAPE sweep run BEFORE
+# looking at points: -15/-25 under-correct, [-40, -60] is a flat plateau giving
+# an identical and correct shape, and -80 breaks K/DST (the wizard starts taking
+# 1.9 K / 1.7 DST because everything else is penalised past the exempted pair).
+# -40 is the conservative end of that plateau; -60 scored +93.0 t +2.86, a
+# difference well inside the noise.
+ROSTER_INTERP = True
+BLOCKED_VALUE = -40.0
 KDST_LATE_ROUNDS = 3   # only value K/DST when this many rounds (or fewer) remain
 RUN_STRENGTH = 0.6     # how hard a LIVE positional run bends survival off ADP (0 = pure ADP)
 RUN_MIN_PICKS = 4      # need this many picks on the board before trusting a run signal
+
+# ----------------------------------------------------------------------------- market model
+# FFC ranks ~212 of the 669 board players. The other ~457 still need a market
+# position, and the old ad-hoc fallback broke practice mode outright:
+#     adp = _ovr (our own value rank)      sd = max(6.0, 0.30 * adp)
+# so an unranked player drew from N(466, 140). opponent_pick takes the ARGMIN of
+# one draw per remaining player, and the minimum of ~600 Gaussians is dominated
+# by the WIDEST ones -- so replacement-level players won early picks outright:
+# Jalen Reagor (_ovr 466, VOR -141) went 12th overall and Efton Chism III 16th,
+# while only 21 of the ADP top-24 went inside the first 24 picks.
+#
+# ⚠ draft_tune.py cannot see this. Its board sets adp = rank(1..N) for EVERY
+# player, so 100% ADP coverage and the fitted sd below -- the tuner never takes
+# the unranked branch at all. The analyzer's objective function is blind to the
+# bug that broke the mock draft.
+#
+# Two changes, both of which the real FFC file supports:
+#  1. sd uses the model FITTED on the 2026 FFC file (stdev ~= 2.09 + 0.0962*adp,
+#     corr 0.710, n=242) rather than 0.30*adp. It is ~3x tighter deep in the
+#     board, which is what actually kills the tail contamination.
+#  2. an unranked player is placed BEHIND everyone the market does rank, ordered
+#     by our value. He is unranked because the market has no opinion on him --
+#     that is not the same as the market rating him where we do.
+ADP_SD_A, ADP_SD_B = 2.09, 0.0962   # fitted on real 2026 FFC ADP (see draft_tune.py)
+ADP_SD_MAX = 30.0                   # keep the deep tail from re-contaminating the argmin
+UNRANKED_PAD = 12.0                 # gap between the last ranked player and the first unranked
+KDST_SD = 8.0
 
 
 @dataclass
@@ -182,21 +242,84 @@ def next_pick_for_slot(cfg: LeagueConfig, current_overall: int) -> int | None:
     return None
 
 
+def _num(x):
+    """A usable float, or None for missing/NaN."""
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def market_sd(mkt: float, given=None) -> float:
+    """Spread of a player's actual draft slot around his market position. Uses
+    FFC's own published stdev when there is one, else the fitted linear model."""
+    g = _num(given)
+    if g is not None and g > 0:
+        return max(0.5, g)
+    return float(np.clip(ADP_SD_A + ADP_SD_B * float(mkt), 1.0, ADP_SD_MAX))
+
+
+def attach_market(board: list[dict], cfg: LeagueConfig) -> None:
+    """Attach `_mkt` (the market's expected draft slot) and `_mkt_sd` to every
+    player, in place. Run AFTER compute_values -- the unranked ordering uses _vor.
+
+    This is the single market model: the mock-draft AI (opponent_pick) and the
+    survival simulation (monte_carlo) must read the same one, or the room you
+    practise against is not the room the survival odds describe."""
+    ranked, unranked, kdst = [], [], []
+    for p in board:
+        sf = _num(p.get("adp_sf"))
+        a = sf if (cfg.superflex and sf) else _num(p.get("adp"))
+        p["_adp_eff"] = a
+        if a is not None:
+            p["_mkt"] = a
+            ranked.append(p)
+        elif p["pos"] in ("K", "DST"):
+            kdst.append(p)
+        else:
+            unranked.append(p)
+
+    floor = (max(p["_mkt"] for p in ranked) if ranked else float(cfg.teams)) + UNRANKED_PAD
+    unranked.sort(key=lambda x: -(_num(x.get("_vor")) or 0.0))
+    for i, p in enumerate(unranked):
+        p["_mkt"] = floor + i
+
+    # K and DST never match the FFC file (it lists "denver defense" against our
+    # "DEN DST"), so they carry no ADP and would sink into the unranked tail --
+    # and then no AI team ever drafts one. Real rooms take them in the last
+    # couple of rounds in positional order, so place them there explicitly.
+    kdst_start = max(1, cfg.teams * max(1, cfg.total_rounds() - 2))
+    for p in kdst:
+        p["_mkt"] = float(kdst_start + (p.get("_posrank") or 1))
+
+    for p in board:
+        p["_mkt_sd"] = (KDST_SD if p["pos"] in ("K", "DST") and p.get("_adp_eff") is None
+                        else market_sd(p["_mkt"], p.get("adp_sd") if p.get("_adp_eff") is not None else None))
+
+
 # ----------------------------------------------------------------------------- survival (Monte Carlo)
 def _impute_adp(p: dict, rank_rem: int, current_overall: int) -> float:
-    a = p.get("_adp_eff", p.get("adp"))
-    if a is not None and not (isinstance(a, float) and math.isnan(a)):
-        return float(a)
-    # no market signal: assume he goes around where the board values him, but late
+    m = _num(p.get("_mkt"))
+    if m is not None:
+        return m
+    a = _num(p.get("_adp_eff")) or _num(p.get("adp"))
+    if a is not None:
+        return a
+    # no market model attached (standalone call): he goes around where the board
+    # values him, but late
     return float(current_overall + rank_rem)
 
 
 def _impute_sd(p: dict) -> float:
-    sd = p.get("adp_sd")
-    if sd is not None and not (isinstance(sd, float) and math.isnan(sd)) and sd > 0:
-        return max(0.5, float(sd))
-    a = p.get("adp") or 60.0
-    return max(8.0, 0.35 * float(a))            # unknown -> wide
+    m = _num(p.get("_mkt"))
+    if m is not None:
+        return float(p.get("_mkt_sd") or market_sd(m, p.get("adp_sd")))
+    sd = _num(p.get("adp_sd"))
+    if sd is not None and sd > 0:
+        return max(0.5, sd)
+    return market_sd(_num(p.get("adp")) or 60.0)
 
 
 def monte_carlo(remaining: list[dict], k_before: int, n_sims: int = 1200,
@@ -265,6 +388,25 @@ def need_scores(cfg: LeagueConfig, counts: dict, rounds_left: int | None = None)
     return need
 
 
+def effective_vor(v, rf, interp=True):
+    """A player's VOR as it counts FOR YOUR ROSTER, given how full that position
+    already is. Scalar or numpy array. See the ROSTER_INTERP note above -- the
+    recommendation and the forward planner must use the SAME rule or the plan
+    contradicts the pick it is planning around.
+
+    `interp=False` opts a position out of the interpolation. K/DST use it: their
+    roster_factor is a flat 0.05 that exists to stop an inflated kicker VOR from
+    dominating, NOT a signal about how full the position is, so feeding it to the
+    interpolation would charge them the full blocked penalty every round and they
+    would simply never be drafted."""
+    if ROSTER_INTERP:
+        return np.where(interp, rf * v + (1.0 - rf) * BLOCKED_VALUE, v * rf)
+    if VOR_DISCOUNT_SYMMETRIC:
+        a = np.asarray(v, dtype=float)
+        return np.where(a >= 0, a * rf, a * (2.0 - rf))
+    return v * rf
+
+
 def roster_factor(cfg: LeagueConfig, pos: str, have: int) -> float:
     """Multiplier on a player's VOR reflecting roster reality: once you can't
     START (or reasonably bench) more of a position, extra copies are ~worthless.
@@ -323,17 +465,28 @@ def archetype_bonus(name: str, pos: str, rnd: int, counts: dict, cfg: LeagueConf
 
 
 # ----------------------------------------------------------------------------- opponent analysis
-def opponent_analysis(cfg: LeagueConfig, picks: list[dict], current_overall: int, my_next: int) -> dict:
+def opponent_analysis(cfg: LeagueConfig, picks: list[dict], current_overall: int, my_next: int,
+                      remaining: list[dict] | None = None) -> dict:
     """picks: [{overall, slot, pos, id, name}]. Roster shape per team + the needs
     of the teams on the clock before your pick + likely position runs."""
     counts = {s: Counter() for s in range(1, cfg.teams + 1)}
     for d in picks:
         counts[d["slot"]][d["pos"]] += 1
     upcoming = [team_on_clock(cfg, o) for o in range(current_overall, my_next or current_overall)]
+    # Tie-break need on the best player actually left at that position. need_scores
+    # is coarse and ties constantly -- an empty roster scores RB 7.0 and WR 7.0 --
+    # and a bare max() takes the first of the tuple, so EVERY seat reported "RB".
+    # At pick 1 that read "teams before your pick most need: RB x23", which is not
+    # a read on the room, it is the tuple order.
+    bestv = {}
+    for p in (remaining or []):
+        if p["_vor"] > bestv.get(p["pos"], -1e9):
+            bestv[p["pos"]] = p["_vor"]
     seat_need = []
     for s in upcoming:
         ns = need_scores(cfg, counts[s])
-        toppos = max(("QB", "RB", "WR", "TE"), key=lambda p: ns.get(p, 0))
+        toppos = max(("QB", "RB", "WR", "TE"),
+                     key=lambda p: (ns.get(p, 0), bestv.get(p, 0.0)))
         seat_need.append({"slot": s, "top_need": toppos})
     demand = Counter(x["top_need"] for x in seat_need)
     return {"team_counts": {s: dict(c) for s, c in counts.items()},
@@ -386,6 +539,10 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
     board = [dict(p) for p in board_in]                 # copy; we annotate
     by_id = {p["id"]: p for p in board}
     compute_values(board, cfg)
+    # market positions are attached on the FULL board, so an unranked player's
+    # imputed slot stays put as the draft empties rather than drifting forward
+    # every pick
+    attach_market(board, cfg)
 
     drafted_set = set(drafted_ids)
     picks = []
@@ -414,9 +571,6 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
     rounds_left = cfg.total_rounds() - len(my_roster_ids)
 
     remaining = [p for p in board if not p.get("_drafted")]
-    for p in remaining:                              # superflex leagues use SF ADP for timing
-        sf = p.get("adp_sf")
-        p["_adp_eff"] = sf if (cfg.superflex and sf) else p.get("adp")
     # live positional run -> bend survival off ADP toward what THIS room is doing
     pressure, act_share, _base = run_signal(picks, board, current_overall,
                                             window=min(len(picks), cfg.teams))
@@ -448,21 +602,26 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         scar = W_SCARCITY * max(0.0, cow.get(pos, 0.0))
         if SCARCITY_ROSTER_AWARE:
             scar *= rf
-        v = p["_vor"]
-        eff = (v * rf if v >= 0 else v * (2.0 - rf)) if VOR_DISCOUNT_SYMMETRIC else v * rf
+        eff = float(effective_vor(p["_vor"], rf, pos not in ("K", "DST")))
         p["_rec_score"] = round(
             eff + scar + W_NEED * need.get(pos, 0.0) + ab, 1)
 
     remaining.sort(key=lambda x: -x["_rec_score"])
     best_available = sorted(remaining, key=lambda x: -x["_vor"])
 
-    opp = opponent_analysis(cfg, picks, current_overall, my_next)
+    opp = opponent_analysis(cfg, picks, current_overall, my_next, remaining)
 
     # tier context for the recommendation's position
     def tier_left(pos, tier):
         return sum(1 for p in remaining if p["pos"] == pos and p.get("_tier") == tier)
 
-    rec = remaining[0] if remaining else None
+    # A draft has a last pick. Without this the app ran on past it -- "Pick 181
+    # (Rd 16)" of a 180-pick draft, "your target for pick None" -- and still
+    # handed out recommendations you could act on.
+    total_picks = cfg.teams * cfg.total_rounds()
+    complete = len(drafted_ids) >= total_picks
+
+    rec = remaining[0] if (remaining and not complete) else None
     reco = None
     if rec:
         reco = {
@@ -474,9 +633,11 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         }
 
     return {
-        "current_overall": current_overall,
-        "round": (current_overall - 1) // cfg.teams + 1,
-        "on_clock": team_on_clock(cfg, current_overall),
+        "current_overall": min(current_overall, total_picks),
+        "round": (min(current_overall, total_picks) - 1) // cfg.teams + 1,
+        "on_clock": None if complete else team_on_clock(cfg, current_overall),
+        "complete": complete,
+        "total_picks": total_picks,
         "my_next_pick": my_next,
         "picks_until_mine": picks_until,
         "my_roster": [_slim(by_id[i]) for i in my_roster_ids if i in by_id],
@@ -495,6 +656,7 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
 
 # ----------------------------------------------------------------------------- forward planner
 POS_ORDER = ("QB", "RB", "WR", "TE", "K", "DST")
+POS_INTERP = np.array([p not in ("K", "DST") for p in POS_ORDER])   # see effective_vor
 
 
 def _bonus6(cfg: LeagueConfig, counts: dict, rnd: int, rounds_left: int) -> np.ndarray:
@@ -512,6 +674,7 @@ def plan_draft(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
     board = [dict(p) for p in board_in]
     by_id = {p["id"]: p for p in board}
     compute_values(board, cfg)
+    attach_market(board, cfg)
     current_overall = len(drafted_ids) + 1
     my_counts0: Counter = Counter()
     for i, pid in enumerate(drafted_ids):
@@ -523,9 +686,6 @@ def plan_draft(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         return {"picks": [], "windows": {}, "note": "Draft complete.", "my_future_picks": []}
 
     remaining = [p for p in board if p["id"] not in set(drafted_ids)]
-    for p in remaining:
-        sf = p.get("adp_sf")
-        p["_adp_eff"] = sf if (cfg.superflex and sf) else p.get("adp")
     n = len(remaining)
     order_rank = {p["id"]: i for i, p in enumerate(sorted(remaining, key=lambda x: -x["_vor"]))}
     adp = np.array([_impute_adp(p, order_rank[p["id"]], current_overall) for p in remaining])
@@ -554,7 +714,8 @@ def plan_draft(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
                 continue
             b6 = _bonus6(cfg, counts, rnd, rounds_left)
             rf6 = np.array([roster_factor(cfg, pp, counts.get(pp, 0)) for pp in POS_ORDER])
-            masked = np.where(avail, vor * rf6[pcode] + b6[pcode], -1e18)
+            masked = np.where(avail, effective_vor(vor, rf6[pcode], POS_INTERP[pcode]) + b6[pcode],
+                              -1e18)
             j = int(np.argmax(masked))
             code = int(pcode[j])
             cpos[k][POS_ORDER[code]] += 1
@@ -594,9 +755,7 @@ def prep_valued(board_in: list[dict], cfg: LeagueConfig) -> list[dict]:
     mock-draft AI to read once."""
     b = [dict(p) for p in board_in]
     compute_values(b, cfg)
-    for p in b:
-        sf = p.get("adp_sf")
-        p["_adp_eff"] = sf if (cfg.superflex and sf) else p.get("adp")
+    attach_market(b, cfg)
     return b
 
 
@@ -617,37 +776,58 @@ def opponent_pick(remaining: list[dict], cfg: LeagueConfig, counts: dict,
                   rng, rounds_left: int = 99) -> dict:
     """One AI opponent pick: draft by ADP (the market) with noise, fill starting
     needs first, respect position caps, and hold K/DST until the last two rounds."""
+    # Nobody finishes a draft with an empty starting slot. A -6.0 nudge is not
+    # enough to guarantee it: on market position alone K and DST (which carry no
+    # ADP at all -- FFC lists "denver defense" against our "DEN DST") lost every
+    # argmin to the ~50 ranked skill players still on the board, and a full mock
+    # filled 2 of 24 K/DST slots while three teams ended with no TE and one with
+    # no QB. Once a team has no more picks left than it has unfilled starting
+    # slots, the pick is forced to one of them.
+    unfilled = []
+    for pp in ("QB", "RB", "WR", "TE", "K", "DST"):
+        want = cfg.starters.get(pp, 0) + (1 if (cfg.superflex and pp == "QB") else 0)
+        unfilled += [pp] * max(0, want - counts.get(pp, 0))
+    must = bool(unfilled) and len(unfilled) >= rounds_left
+    forced = set(unfilled)
+
     best, bkey = None, 1e18
     for p in remaining:
         pos = p["pos"]
+        if must and pos not in forced:
+            continue
         if counts.get(pos, 0) >= OPP_CAP.get(pos, 8):
             continue
         if pos in ("K", "DST") and rounds_left > 2:
             continue
-        adp = p.get("_adp_eff")
-        if adp is None or (isinstance(adp, float) and math.isnan(adp)):
-            adp = p.get("adp")
-        if adp is None or (isinstance(adp, float) and math.isnan(adp)):
-            adp = float(p.get("_ovr", 200))                 # no market signal -> value rank
-        sd = p.get("adp_sd")
-        sd = float(sd) if (sd and not (isinstance(sd, float) and math.isnan(sd))) else max(6.0, 0.30 * float(adp))
-        key = rng.normal(float(adp), sd)
+        # _mkt / _mkt_sd come from attach_market -- the SAME market model the
+        # survival simulation reads. Do not re-derive a spread from adp here:
+        # this loop is an argmin over ~600 draws, so any position whose sd is
+        # overstated wins picks it should never win (see the market-model note).
+        mkt = _impute_adp(p, int(p.get("_ovr") or 200), 0)
+        key = rng.normal(mkt, _impute_sd(p))
         if _needs_starter(cfg, pos, counts):
             key -= 6.0                                      # draft a needed starter ~a round earlier
         if key < bkey:
             bkey, best = key, p
-    if best is None:                                         # everyone capped -> best available by adp
-        best = min(remaining, key=lambda x: (x.get("adp") or x.get("_ovr", 999)))
+    if best is None:                                         # everyone capped -> best available by market
+        best = min(remaining, key=lambda x: _impute_adp(x, int(x.get("_ovr") or 200), 0))
     return best
 
 
-def mock_advance(valued_board: list[dict], cfg: LeagueConfig, drafted_ids: list[str], rng) -> list[str]:
+def mock_advance(valued_board: list[dict], cfg: LeagueConfig, drafted_ids: list[str], rng,
+                 max_picks: int | None = None) -> list[str]:
     """Auto-draft for every team that isn't YOU until it's your pick (or the draft
-    ends). Returns the extended drafted-id list. Pass a board from prep_valued()."""
+    ends). Returns the extended drafted-id list. Pass a board from prep_valued().
+
+    `max_picks` caps how many opponent picks are made in one call, so the UI can
+    step the room forward one pick at a time instead of jumping to your turn."""
     by_id = {p["id"]: p for p in valued_board}
     drafted = list(drafted_ids)
     total = cfg.teams * cfg.total_rounds()
+    made = 0
     while len(drafted) < total:
+        if max_picks is not None and made >= max_picks:
+            break
         overall = len(drafted) + 1
         if team_on_clock(cfg, overall) == cfg.my_slot:
             break
@@ -659,6 +839,7 @@ def mock_advance(valued_board: list[dict], cfg: LeagueConfig, drafted_ids: list[
         if not rem:
             break
         drafted.append(opponent_pick(rem, cfg, counts, rng, rl)["id"])
+        made += 1
     return drafted
 
 

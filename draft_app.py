@@ -131,6 +131,8 @@ def draft_ids(ids):
 def undo():
     if ss.drafted:
         ss.drafted.pop()
+        # keep the "gone since your last pick" window inside the draft
+        ss["last_my_pick"] = min(int(ss.get("last_my_pick") or 0), len(ss.drafted))
 
 
 SLEEPER_USER_ID = "430840397841838080"   # PennerBoy -- auto-detect your draft slot from draft_order
@@ -162,11 +164,32 @@ def sleeper_sync(draft_id: str = None, league_id: str = None):
     return len(matched), missed, ci
 
 
+def total_picks():
+    return cfg.teams * cfg.total_rounds()
+
+
 def do_pick(pid):
     """Commit a pick; in practice mode, let the AI draft the other teams up to your next pick."""
+    if len(ss.drafted) >= total_picks():      # the draft has a last pick
+        return
     draft_ids([pid])
-    if st.session_state.get("practice"):
+    ss["last_my_pick"] = len(ss.drafted)      # where the "since your pick" feed starts
+    # With auto-advance off the room does NOT jump to your next turn, so the
+    # step controls have something to step: otherwise every pick lands you back
+    # on the clock and "one pick" is always a no-op.
+    if st.session_state.get("practice") and ss.get("auto_adv", True):
         ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
+
+
+def team_roster(slot):
+    """[(overall, player)] for one drafting slot, in pick order."""
+    out = []
+    for i, pid in enumerate(ss.drafted):
+        if team_on_clock(cfg, i + 1) == slot:
+            p = by_id.get(pid)
+            if p:
+                out.append((i + 1, p))
+    return out
 
 
 # draft_board_html lives in draft_board.py (imported at top) -- pure + headless-testable
@@ -274,7 +297,8 @@ with st.sidebar:
     if st.button("↩︎ Undo last pick", width="stretch"):
         undo(); st.rerun()
     if st.button("🗑 Reset draft", width="stretch"):
-        ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None); ss["started"] = False; st.rerun()
+        ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None)
+        ss["last_my_pick"] = 0; ss["started"] = False; st.rerun()
 
 
 # rookie board: re-rank by the market value matching the league type (1QB vs superflex)
@@ -295,6 +319,7 @@ if not ss["started"]:
     if st.button("▶ Start draft", type="primary", width="stretch"):
         ss.drafted = []
         ss.pop("plan", None)
+        ss["last_my_pick"] = 0
         if ss.get("practice"):
             ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
         ss["started"] = True
@@ -308,11 +333,15 @@ res = analyze(working, cfg, ss.drafted)
 on_clock_me = res["on_clock"] == cfg.my_slot
 
 # --------------------------------------------------------------------------- header
+done = res["complete"]
 h1, h2, h3 = st.columns([2, 2, 3])
 h1.metric("Pick", f"{res['current_overall']}  (Rd {res['round']})")
-h2.metric("On the clock", f"Team {res['on_clock']}" + ("  ← YOU" if on_clock_me else ""))
+h2.metric("On the clock",
+          "— done —" if done else (f"Team {res['on_clock']}" + ("  ← YOU" if on_clock_me else "")))
 h3.metric("Your next pick", f"{res['my_next_pick']}  ({res['picks_until_mine']} away)"
           if res["my_next_pick"] else "—")
+st.progress(min(1.0, len(ss.drafted) / max(1, res["total_picks"])),
+            text=f"{len(ss.drafted)} of {res['total_picks']} picks made")
 if on_clock_me:
     st.success("🟢 **You're on the clock**")
 
@@ -326,27 +355,67 @@ if uc[1].button("🗑 Reset draft", width="stretch"):
 # --------------------------------------------------------------------------- practice controls
 if st.session_state.get("practice"):
     pc = st.container(border=True)
-    pc.write(f"🎮 **Practice mode** — AI drafts the other {cfg.teams - 1} teams by ADP; you pick your own.")
-    pcc = pc.columns(3)
-    if pcc[0].button("▶ Sim to my pick", width="stretch"):
+    pc.write(f"🎮 **Practice mode** — AI drafts the other {cfg.teams - 1} teams off ADP; you pick your own.")
+    pcc = pc.columns(4)
+    if pcc[0].button("▶ Sim to my pick", width="stretch", disabled=done):
         ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
         st.rerun()
-    if pcc[1].button("🔄 New mock", width="stretch"):
-        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+    if pcc[1].button("⏱ One pick", width="stretch", disabled=done or on_clock_me,
+                     help="Advance the room a single pick so you can watch it develop. "
+                          "Needs auto-advance off, otherwise the room is already at your turn."):
+        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted,
+                                  np.random.default_rng(), max_picks=1)
         st.rerun()
-    if pcc[2].button("⏭ Auto-draft rest", width="stretch",
-                     help="AI finishes the whole draft, picking your team by your Strategy"):
+    if pcc[2].button("🔄 New mock", width="stretch"):
+        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+        ss.pop("plan", None); ss["last_my_pick"] = 0
+        st.rerun()
+    _auto = pcc[3].button("⏭ Auto-draft rest", width="stretch", disabled=done,
+                          help="AI finishes the whole draft, picking your team by your Strategy")
+    # a fixed slot inside the practice panel, written to from the loop below --
+    # auto-drafting a full board runs a Monte-Carlo per remaining round, which is
+    # several seconds of silence otherwise
+    pc.checkbox("Auto-advance to my next pick", key="auto_adv", value=True,
+                help="Off = the room stays where it is after you pick, so you can step "
+                     "through the other teams one pick at a time.")
+    prog = pc.empty()
+    if _auto:
         valued = prep_valued(working, cfg); rng = np.random.default_rng()
-        total = cfg.teams * cfg.total_rounds(); guard = 0
+        total = total_picks(); guard = 0
         while len(ss.drafted) < total and guard < total + 5:
             ss.drafted = mock_advance(valued, cfg, ss.drafted, rng)
             if len(ss.drafted) >= total:
                 break
-            _r = analyze(working, cfg, ss.drafted).get("recommendation")
+            # a cheaper sim than the on-screen default: this runs once per remaining
+            # round, and the pick only needs the ranking, not 4-digit survival odds
+            _r = analyze(working, cfg, ss.drafted, n_sims=300).get("recommendation")
             if not _r:
                 break
             ss.drafted.append(_r["id"]); guard += 1
+            prog.progress(min(1.0, len(ss.drafted) / total),
+                          text=f"Auto-drafting… {len(ss.drafted)}/{total}")
         st.rerun()
+
+# --------------------------------------------------------------------------- draft complete
+if done:
+    g = grade_draft(cfg, ss.drafted, working)
+    fin = st.container(border=True)
+    fin.markdown(f"### 🏁 Draft complete — {res['total_picks']} picks over {cfg.total_rounds()} rounds")
+    fm = fin.columns(3)
+    fm[0].metric("Your grade", g["grade"])
+    fm[1].metric("Finish", f"{g['my_rank']} of {g['teams']}")
+    fm[2].metric("Value banked", f"{g['my_value']:.0f}",
+                 delta=f"{g['my_value'] - g['league_avg']:+.0f} vs league avg")
+    if g.get("best_pick"):
+        fin.caption(f"Best pick: **{g['best_pick'][0]}** — {g['best_pick'][2]}, VOR {g['best_pick'][1]:.0f}")
+    fin.caption("The grade ranks your roster's total positive VOR against the other teams "
+                "**on our own board's valuation**. In practice mode the AI drafts off ADP, so it "
+                "measures how far you beat the market *by our numbers* — it is not a projected finish.")
+    if st.session_state.get("practice"):
+        if fin.button("🔄 Run another mock", type="primary", key="again", width="stretch"):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+            ss.pop("plan", None); ss["last_my_pick"] = 0
+            st.rerun()
 
 # --------------------------------------------------------------------------- recommendation
 rec = res["recommendation"]
@@ -366,10 +435,10 @@ if rec:
         box.caption(f"🎯 Your target for pick {res['my_next_pick']}. "
                     f"⏳ Team {res['on_clock']} is on the clock — tap who they take below.")
 
-    # marking / quick-pick row (context-aware)
-    if st.session_state.get("practice"):
-        _cap = "Quick-pick a player for your team:"
-    elif on_clock_me:
+    # marking / quick-pick row. A tap always books the pick for whoever is ON THE
+    # CLOCK, so say whose it is -- with auto-advance off, practice mode can sit on
+    # another team's turn and "quick-pick for your team" would be a lie.
+    if on_clock_me:
         _cap = "Your pick — tap your player, or use Draft above:"
     else:
         _cap = f"Tap who Team {res['on_clock']} just drafted:"
@@ -387,11 +456,14 @@ with st.expander("🗺️ Draft Board — all teams, picks & trades"):
                + (" · ⇄ = traded pick (now the tagged team's)" if ss.get("sleeper_state") else ""))
 
 # manual mark-off (search anyone)
-undrafted = [p for p in working if p["id"] not in set(ss.drafted)]
-label = {f"{p['name']} · {p['pos']}-{p.get('team','')}": p["id"] for p in undrafted}
-pick_label = st.selectbox("Or search a player who was just drafted:", [""] + list(label.keys()))
-if st.button("Mark drafted") and pick_label:
-    do_pick(label[pick_label]); st.rerun()
+if not done:
+    undrafted = [p for p in working if p["id"] not in set(ss.drafted)]
+    label = {f"{p['name']} · {p['pos']}-{p.get('team','')}": p["id"] for p in undrafted}
+    _prompt = ("Or search a player to draft:" if (st.session_state.get("practice") or on_clock_me)
+               else "Or search a player who was just drafted:")
+    pick_label = st.selectbox(_prompt, [""] + list(label.keys()))
+    if st.button("Mark drafted") and pick_label:
+        do_pick(label[pick_label]); st.rerun()
 
 with st.expander("📋 Draft plan — simulate the rest of your draft"):
     st.caption("Monte-Carlo your remaining picks (opponents pick by ADP, you by your Strategy) "
@@ -438,7 +510,18 @@ with left:
            .background_gradient(subset=["VOR"], cmap="Greens")
            .background_gradient(subset=["Surv%"], cmap="RdYlGn")
            .format({"VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}", "Surv%": "{:.0f}", "Decl%": "{:.0f}"}, na_rep="—"))
-    st.dataframe(sty, width="stretch", hide_index=True, height=560)
+    # the whole board is a pick control, not just the five chips above. Keying the
+    # widget on the pick count gives each pick a FRESH selection -- otherwise the
+    # row stays selected through the rerun and re-fires do_pick every time.
+    _sel = st.dataframe(sty, width="stretch", hide_index=True, height=560,
+                        selection_mode="single-row", on_select="rerun",
+                        key=f"ba_{len(ss.drafted)}")
+    _rows = list(getattr(getattr(_sel, "selection", None), "rows", None) or [])
+    if _rows and not done:
+        do_pick(res["best_available"][_rows[0]]["id"])
+        st.rerun()
+    st.caption("👆 Tap any row to draft that player." if on_clock_me
+               else ("" if done else f"👆 Tap any row to mark them drafted by Team {res['on_clock']}."))
     st.caption(
         "**Arc** = where our projection sits in the distribution of what comparable "
         "players did NEXT (same position, same career year, similar draft pedigree "
@@ -449,19 +532,42 @@ with left:
 
 with right:
     if ss.drafted:
-        st.subheader("Recently drafted")
         n = len(ss.drafted)
+        # in a mock the room moves several picks between your turns, so what you
+        # actually want to see is "what went off the board while I waited"
+        since = int(ss.get("last_my_pick") or 0)
+        window = n - since if (since and n > since) else min(8, n)
+        st.subheader(f"Gone since your last pick ({window})" if since and n > since
+                     else "Recently drafted")
         rrows = []
-        for overall in range(n, max(0, n - 8), -1):
+        for overall in range(n, max(0, n - window), -1):
             p = by_id.get(ss.drafted[overall - 1])
             if not p:
                 continue
             slot = team_on_clock(cfg, overall)
+            # `by_id` holds RAW board dicts -- _vor only exists on analyze()'s
+            # internal copy, so reading it here would render a silently blank
+            # column. ADP is on the board itself and is the useful read anyway:
+            # it shows who is going early vs the market.
             rrows.append({"Pk": overall, "By": ("YOU" if slot == cfg.my_slot else f"T{slot}"),
-                          "Player": p["name"], "Pos": p["pos"]})
+                          "Player": p["name"], "Pos": p["pos"], "ADP": p.get("adp")})
         st.dataframe(pd.DataFrame(rrows), hide_index=True, width="stretch", height=180)
 
-    if len(ss.drafted) >= 2 * cfg.teams:
+    with st.expander("👥 Team rosters — see what every seat has"):
+        _sl = st.selectbox("Team", list(range(1, cfg.teams + 1)),
+                           index=cfg.my_slot - 1,
+                           format_func=lambda s: f"Team {s}" + (" ★ you" if s == cfg.my_slot else ""))
+        _r = team_roster(_sl)
+        if _r:
+            st.dataframe(pd.DataFrame([{"Pk": o, "Pos": p["pos"], "Player": p["name"],
+                                        "Tm": p.get("team")} for o, p in _r]),
+                         hide_index=True, width="stretch", height=240)
+            _c = pd.Series([p["pos"] for _, p in _r]).value_counts()
+            st.caption("  ".join(f"{k} {v}" for k, v in _c.items()))
+        else:
+            st.caption("No picks yet.")
+
+    if len(ss.drafted) >= 2 * cfg.teams and not done:
         g = grade_draft(cfg, ss.drafted, working)
         st.subheader("Final draft grade" if res["my_next_pick"] is None else "Draft grade so far")
         gc1, gc2 = st.columns([1, 2])
