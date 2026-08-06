@@ -372,12 +372,19 @@ def need_scores(cfg: LeagueConfig, counts: dict, rounds_left: int | None = None)
             starters += 1
         have = counts.get(pos, 0)
         if pos in ("K", "DST"):
-            if have >= 1:
-                need[pos] = -50.0                                   # never a 2nd
+            want = cfg.starters.get(pos, 0)
+            if want == 0:
+                # the league does not START one, so a body here is dead weight.
+                # This gate was missing: the late-round nudge fired on roster size
+                # alone, and in ReDrafters Rejoice (12T SF, DST but NO K) the
+                # wizard spent a pick on a kicker it could never start.
+                need[pos] = -99.0
+            elif have >= want:
+                need[pos] = -50.0                                   # never a spare
             elif rounds_left is not None and rounds_left <= KDST_LATE_ROUNDS:
                 need[pos] = 6.0                                     # last few rounds: grab one
             else:
-                need[pos] = -30.0                                  # far too early
+                need[pos] = -30.0                                   # far too early
             continue
         gap = starters - have
         if gap >= 1:
