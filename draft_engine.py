@@ -27,7 +27,73 @@ from pathlib import Path
 
 import numpy as np
 
+import bestball as bb
+
 # ----------------------------------------------------------------------------- config
+# ── best ball ────────────────────────────────────────────────────────────────
+# Marginal value is Monte-Carlo'd per candidate, so it is not free. Scoring the
+# whole remaining board every pick would be ~2M array ops per call; capping to
+# the top N BY POSITION keeps it a few ms and cannot change the answer, because
+# the pick is always the best available at SOME position and this always
+# contains each position's best N. Per-position rather than overall on purpose:
+# an overall-VOR cap would starve whichever position the board rates lowest,
+# which in best ball is exactly where a high-variance value pick hides.
+BB_CANDIDATES_PER_POS = 25
+BB_SIMS = 300          # (n_sims, 17) gamma draws per player; 300 keeps MC noise
+                       # well under the gaps it has to resolve
+
+# ⭐ How hard to price "I could get someone similar at this position later".
+#   score = bb - BB_REPL_WEIGHT * replacement
+# The two limits are both WRONG, in opposite and instructive ways:
+#   λ = 0  pure marginal value. One-step greedy: on an empty roster every bar is
+#          0, so it reduces to raw projected points and takes six QBs off the
+#          top -- it cannot see that a near-equal QB is available two rounds
+#          later while a near-equal RB is not.
+#   λ = 1  pure tier-gap edge. Ignores MAGNITUDE, and in a format where you are
+#          maximising a SUM over 20 fixed picks that is a real error. Measured
+#          at round 13 it took Mark Andrews (marginal value 16.3, edge 9.8) over
+#          Jakobi Meyers (marginal value 83.7, edge 8.2) -- a 16-point player
+#          over an 84-point one because the TE cliff was 1.6 points steeper.
+#          Across a full mock that built QB 4 / TE 5 rosters against DK's
+#          QB 2-3 / TE 2-3.
+# So λ is genuinely empirical. Swept on ROSTER SHAPE first and points second, on
+# BOTH seasons (bestball_duel.py, 20 paired leagues/season, seats swapped, true
+# DK points). ⛔ NO SETTING BEAT THE SHIPPED REDRAFT ENGINE:
+#       λ     2025            2024            verdict
+#       0.0   +162 t +3.79    -295 t -4.94    sign flips hard
+#       0.5   +104 t +1.99    -370 t -7.08    sign flips hard
+#       1.0   -117 t -2.49     -39 t -1.04    consistent, NEGATIVE
+#       1.5  -1320           -1493            degenerate (see cliff below)
+#
+# ⚠⚠ BUT THAT MEASUREMENT IS CONFOUNDED, and the confound is bigger than the
+# effect. This arm drafts RB-heavier and the redraft arm WR-heavier, so A-B
+# mostly measures WHICH POSITION BEAT ITS PROJECTION that season:
+#       2024  RB actual/proj 0.990 vs WR 1.125  -> RB-WR -0.135, A loses -295
+#       2025  RB actual/proj 1.063 vs WR 1.070  -> RB-WR -0.007, A wins  +162
+# The ordering matches exactly. With only two seasons a positional realisation
+# of that size swamps any roster-construction difference, so this harness cannot
+# currently resolve the question in either direction -- do not read the negative
+# result as "the model is wrong", and do not read λ=0's 2025 win as a win.
+# Settling it needs a market that drafts BEST-BALL shaped; draft_tune's
+# opponents follow a redraft-shaped market derived from our own board, which is
+# also why pure VOR-chasing (the redraft arm) does so well against them.
+#
+# ⛔ λ > 1 IS STRUCTURALLY UNSAFE -- the same sign inversion that produced
+# BLOCKED_VALUE. Once λ·replacement exceeds bb for everyone, every score is
+# negative and the winner is the LEAST negative, i.e. the position with the
+# smallest replacement -- which is TE. At λ=1.5 the wizard drafted 16-17 TEs out
+# of 20 picks. 1.0 is therefore the top of the usable range, not a midpoint.
+BB_REPL_WEIGHT = 1.0
+BB_REPL_WEIGHT_MAX = 1.0     # see the cliff above; enforced in _bb_score
+
+# Rank-dependent weekly CV (bestball.WEEKLY_CV_BY_RANK). Lives here as well as in
+# bestball so draft_tune can A/B it through its knobs dict, which only reaches
+# draft_engine module globals; _bb_values mirrors it onto bestball.USE_RANK_CV.
+# ⛔ OFF. It is the better-calibrated input (+7.5% OOS on E[max(0,x-B)]) and the
+# worse BOARD (-113.9 pts, t -3.05, sign consistent across both seasons, with the
+# position-mix confound controlled). See the long note in bestball.py -- the pick
+# is a ranking, and a uniformly better input can still order players worse.
+BB_RANK_CV = False
 # points to SUBTRACT per reception from the full-PPR baseline (pts is already PPR):
 # a PPR league subtracts nothing; standard strips the whole reception point.
 SCORING_PER_REC = {"ppr": 0.0, "half": 0.5, "standard": 1.0}
@@ -141,6 +207,12 @@ class LeagueConfig:
     snake: bool = True
     rounds: int | None = None
     archetype: str = "value"             # value | zero_rb | hero_rb | robust_rb | hero_wr | elite_te
+    # Best ball: the weekly lineup is set FOR you from your whole roster, so a
+    # bench player is not insurance -- he is played automatically in any week he
+    # outscores your starters. That inverts the redraft roster logic (a "blocked"
+    # position does not exist), so value comes from bestball.py's marginal option
+    # model instead of effective_vor/need. See BB_CANDIDATES_PER_POS.
+    best_ball: bool = False
 
     def roster_size(self) -> int:
         return sum(self.starters.values()) + self.bench
@@ -272,6 +344,17 @@ def attach_market(board: list[dict], cfg: LeagueConfig) -> None:
     for p in board:
         sf = _num(p.get("adp_sf"))
         a = sf if (cfg.superflex and sf) else _num(p.get("adp"))
+        # ⭐ BEST BALL USES A BEST-BALL MARKET. FFC's ADP is a REDRAFT market and
+        # is the wrong shape here in three specific ways: it ranks only ~222 of
+        # the board against the 240 picks a 12x20 draft consumes, it includes
+        # K and DST (which DK best ball does not roster at all), and it prices
+        # QBs and high-variance receivers the way a start-one-QB redraft league
+        # does rather than the way a best-ball room does. JJ Zachariason's
+        # best-ball list is 250 deep, carries no K/DST, and is native to the
+        # format, so it is the better market wherever he has an opinion. FFC
+        # remains the fallback so a player he does not rank still gets a slot.
+        if cfg.best_ball:
+            a = _num(p.get("jj_bb_ovr")) or a
         p["_adp_eff"] = a
         if a is not None:
             p["_mkt"] = a
@@ -539,6 +622,76 @@ def _strategy_summary(pressure: dict, act_share: dict, remaining: list[dict]) ->
 
 
 # ----------------------------------------------------------------------------- façade
+def bb_slots(cfg: LeagueConfig) -> dict:
+    """Dedicated weekly starting slots by position, for the bar computation.
+    FLEX is handled separately by bestball.roster_bars (it is not a position),
+    and K/DST are dropped -- DK best ball does not roster them."""
+    return {pos: int(cfg.starters.get(pos, 0))
+            for pos in ("QB", "RB", "WR", "TE") if cfg.starters.get(pos, 0)}
+
+
+def _bb_values(board: list[dict], cfg: LeagueConfig, my_roster_ids: list[str],
+               by_id: dict, remaining: list[dict]) -> dict[str, float]:
+    """{id: marginal best-ball value} for the candidates worth scoring.
+
+    ⚠ ONE HELPER, used by BOTH `analyze` and `plan_draft`. The forward plan
+    contradicting the pick it plans around is a real failure mode here -- it bit
+    ROSTER_INTERP for exactly this reason -- and the only defence is that there
+    is a single place the value is computed.
+    """
+    bb.USE_RANK_CV = BB_RANK_CV          # keep the A/B switch in one place
+    roster = [by_id[i] for i in my_roster_ids if i in by_id]
+    by_pos: dict[str, list] = {}
+    for p in sorted(remaining, key=lambda x: -x["_vor"]):
+        lst = by_pos.setdefault(p["pos"], [])
+        if len(lst) < BB_CANDIDATES_PER_POS:
+            lst.append(p)
+    cands = [p for lst in by_pos.values() for p in lst]
+    return bb.value_board(cands, roster, n_sims=BB_SIMS,
+                          seed=len(my_roster_ids), slots=bb_slots(cfg))
+
+
+def _bb_replacement(remaining: list[dict], bb_val: dict[str, float],
+                    surv_by_id: dict[str, float]) -> dict[str, float]:
+    """{id: expected best marginal value available AT THAT POSITION at your next
+    pick, if you pass on this player}.
+
+    ⚠ THE CANDIDATE IS EXCLUDED FROM HIS OWN REPLACEMENT, and that is not a
+    detail. Included, a position's best player is his own alternative whenever
+    he is certain to survive (at the turn, survival = 1), so his score is
+    identically 0 -- and every position leader ties at 0, making the pick
+    arbitrary among four players. Excluded, his score becomes exactly the drop
+    to the next man at his position, which is the tier cliff and the thing you
+    actually want to pay for.
+
+    Expected-max over an independent survival draw: walk the position in value
+    order, take each player weighted by the chance he is there AND everyone
+    better is gone. Independence is an approximation (real runs are correlated,
+    which `run_signal` already bends the survival odds for), and it is applied
+    identically to every candidate, so it cannot bias one position against
+    another.
+    """
+    out: dict[str, float] = {}
+    by_pos: dict[str, list] = {}
+    for p in remaining:
+        if p["id"] in bb_val:
+            by_pos.setdefault(p["pos"], []).append(p)
+    for pos, lst in by_pos.items():
+        lst.sort(key=lambda x: -bb_val.get(x["id"], 0.0))
+        for j, cand in enumerate(lst):
+            acc, gone = 0.0, 1.0
+            for i, other in enumerate(lst):
+                if i == j:
+                    continue
+                s = float(surv_by_id.get(other["id"], 1.0))
+                acc += bb_val.get(other["id"], 0.0) * s * gone
+                gone *= (1.0 - s)
+                if gone < 1e-4:
+                    break
+            out[cand["id"]] = acc
+    return out
+
+
 def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
             n_sims: int = 1200) -> dict:
     """Recompute the whole wizard state. `drafted_ids` is the ordered list of
@@ -599,19 +752,66 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
     need = need_scores(cfg, my_counts, rounds_left)
     my_round = (((my_next or current_overall) - 1) // cfg.teams) + 1   # round you're drafting for
 
+    bb_val = _bb_values(board, cfg, my_roster_ids, by_id, remaining) if cfg.best_ball else None
+    # ⚠ No next pick => waiting is not an option => the alternative is worth
+    # NOTHING. Without this the final pick still priced a replacement (survival
+    # is a trivial 1.0 once k_before is 0), so the last selection was made on
+    # tier gap rather than on value, which is strictly backwards when there is
+    # no later pick to protect.
+    bb_repl = (_bb_replacement(remaining, bb_val, surv_by_id)
+               if (bb_val is not None and my_next is not None) else {})
+
     for p in remaining:
         pos = p["pos"]
         p["_surv"] = round(surv_by_id.get(p["id"], 1.0), 3)
         p["_cow"] = cow.get(pos, 0.0)
         p["_need"] = round(need.get(pos, 0.0), 1)
-        rf = roster_factor(cfg, pos, my_counts.get(pos, 0))
         ab = archetype_bonus(cfg.archetype, pos, my_round, my_counts, cfg)
+        if bb_val is not None:
+            continue                                   # scored below, in two passes
+        rf = roster_factor(cfg, pos, my_counts.get(pos, 0))
         scar = W_SCARCITY * max(0.0, cow.get(pos, 0.0))
         if SCARCITY_ROSTER_AWARE:
             scar *= rf
         eff = float(effective_vor(p["_vor"], rf, pos not in ("K", "DST")))
         p["_rec_score"] = round(
             eff + scar + W_NEED * need.get(pos, 0.0) + ab, 1)
+
+    if bb_val is not None:
+        # Marginal value ALREADY prices roster fit -- an empty slot gives a bar
+        # of 0 (so it scores full value) and a full one gives a high bar (so it
+        # decays toward 0). Adding need/roster_factor on top would double-count
+        # the same signal, and effective_vor would reintroduce the
+        # blocked-position penalty this format does not have.
+        #
+        # ⭐ But marginal value ALONE is one-step greedy and gets the draft badly
+        # wrong: on an empty roster every bar is 0, so it reduces to raw
+        # projected points and recommends six QBs off the top. What matters is
+        # not what a player adds, it is what he adds OVER the player you would
+        # get at that position instead -- you would still land a near-equal QB
+        # two rounds later, where you would not land a near-equal RB.
+        # `_bb_replacement` is that alternative, priced in the same marginal
+        # units and against THIS draft's survival odds.
+        scored = [p for p in remaining if p["id"] in bb_val]
+        lam = min(float(BB_REPL_WEIGHT), BB_REPL_WEIGHT_MAX)   # see the λ>1 cliff
+        for p in scored:
+            p["_bb"] = round(bb_val[p["id"]], 1)
+            p["_bb_repl"] = round(bb_repl.get(p["id"], 0.0), 1)
+            p["_rec_score"] = round(
+                p["_bb"] - lam * p["_bb_repl"]
+                + archetype_bonus(cfg.archetype, p["pos"], my_round, my_counts, cfg), 1)
+        # ⚠ Only the top BB_CANDIDATES_PER_POS at each position are Monte-Carlo'd.
+        # The rest MUST sort below every scored player: leaving them at a default
+        # 0.0 puts them above anyone with a negative edge, and since a negative
+        # edge just means "you can wait", that floated replacement-level players
+        # into the top 6 at pick 1. They are strictly worse than 25 players at
+        # their own position, so ranking them under the scored set by VOR is
+        # right; the tiny VOR term only preserves their order among themselves.
+        floor = min((p["_rec_score"] for p in scored), default=0.0)
+        for p in remaining:
+            if p["id"] not in bb_val:
+                p["_bb"] = None
+                p["_rec_score"] = round(floor - 1.0 + p["_vor"] / 1e4, 2)
 
     remaining.sort(key=lambda x: -x["_rec_score"])
     best_available = sorted(remaining, key=lambda x: -x["_vor"])
@@ -635,6 +835,7 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
             "id": rec["id"], "name": rec["name"], "pos": rec["pos"], "team": rec.get("team"),
             "posrank": rec["_posrank"], "vor": rec["_vor"], "tier": rec.get("_tier"),
             "survival": rec["_surv"], "cost_of_waiting": rec["_cow"], "need": rec["_need"],
+            "bb": rec.get("_bb"), "bb_repl": rec.get("_bb_repl"),
             "tier_left": tier_left(rec["pos"], rec.get("_tier")),
             "reason": _reason(rec, cow, need, opp["demand"]),
         }
@@ -914,7 +1115,10 @@ def _slim(p: dict, full: bool = False) -> dict:
     if full:
         out.update({"survival": p.get("_surv"), "cost_of_waiting": p.get("_cow"),
                     "rec_score": p.get("_rec_score"), "ecr": p.get("ecr"), "clay": p.get("clay"),
-                    "need": p.get("_need")})
+                    "need": p.get("_need"),
+                    # best-ball marginal value + the alternative it is scored
+                    # against; both absent (None) in redraft
+                    "bb": p.get("_bb"), "bb_repl": p.get("_bb_repl")})
     return out
 
 

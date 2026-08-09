@@ -36,6 +36,19 @@ PRESETS = {
     "12-team Standard (1QB)":  dict(teams=12, scoring="standard", superflex=False),
 }
 
+# DraftKings Best Ball, verified against DK's published rules: 20 roster spots,
+# weekly lineup QB/2RB/3WR/TE/FLEX, no K or DST, snake, 12 teams. Scoring is DK
+# classic (full PPR + 3 at 300 pass / 100 rush / 100 rec yards) -- the board is
+# PPR, and the bonuses are a small monotone add on top, so `ppr` is the right
+# setting for the reception term here.
+DK_BESTBALL = dict(
+    teams=12, scoring="ppr", superflex=False, snake=True, rounds=20, bench=12,
+    kind="bestball", best_ball=True,
+    starters={"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1,
+              "SUPERFLEX": 0, "K": 0, "DST": 0},
+)
+PRESETS["DraftKings Best Ball — 12T 20rd"] = dict(DK_BESTBALL)
+
 
 def _load_league_presets():
     """Merge the generic presets with YOUR real leagues from data/league_presets.json
@@ -112,8 +125,10 @@ board = get_board()
 ss = st.session_state
 ss.setdefault("drafted", [])          # ordered list of drafted player ids
 
-mode = st.sidebar.radio("Draft type", ["Redraft", "Rookie (dynasty)"], horizontal=True)
+mode = st.sidebar.radio("Draft type", ["Redraft", "Best Ball", "Rookie (dynasty)"],
+                        horizontal=True)
 rookie_mode = mode.startswith("Rookie")
+bb_mode = mode.startswith("Best Ball")
 st.sidebar.checkbox("🎮 Practice (mock draft vs AI)", key="practice",
                     help="AI drafts the other teams by ADP; you make your own picks.")
 working = build_rookie_board(board) if rookie_mode else board
@@ -201,7 +216,16 @@ with st.sidebar:
     preset = st.selectbox("Quick league", ["Custom"] + list(ALL_PRESETS),
                           help="Your real leagues (from Sleeper/ESPN) + generic setups, or Custom.")
     teams = st.number_input("Teams", 4, 16, 12)
-    if not rookie_mode:
+    if bb_mode:
+        # Best ball has no lineup decision and no waiver wire, so the strategy
+        # archetypes (which are about how you SEQUENCE a startable roster) do
+        # not apply -- value comes from bestball.py instead. Scoring is DK.
+        scoring, superflex, archetype = "ppr", False, "value"
+        st.caption("**DraftKings Best Ball** — 20 rounds, QB/2RB/3WR/TE/FLEX, "
+                   "no K or DST. Players are valued by what they add to your "
+                   "**optimal weekly lineup**, so bench depth, ceiling and bye "
+                   "coverage all count.")
+    elif not rookie_mode:
         scoring = st.selectbox("Scoring", ["ppr", "half", "standard"],
                                format_func=lambda s: {"ppr": "PPR", "half": "Half-PPR", "standard": "Standard"}[s])
         superflex = st.checkbox("Superflex (2 QB slots)")
@@ -213,20 +237,26 @@ with st.sidebar:
         r_linear = st.checkbox("Linear draft (not snake)")
         st.caption("Rookies valued by dynasty value; pseudo-ADP = dynasty rank (no public rookie ADP yet).")
     my_slot = st.number_input("Your draft slot", 1, int(teams), 1)
+    _d = DK_BESTBALL["starters"] if bb_mode else {}
     with st.expander("Starting lineup / bench"):
         c1, c2 = st.columns(2)
-        n_qb = c1.number_input("QB", 0, 3, 1)
-        n_rb = c2.number_input("RB", 0, 4, 2)
-        n_wr = c1.number_input("WR", 0, 4, 2)
-        n_te = c2.number_input("TE", 0, 3, 1)
-        n_fx = c1.number_input("FLEX", 0, 3, 1)
+        n_qb = c1.number_input("QB", 0, 3, _d.get("QB", 1))
+        n_rb = c2.number_input("RB", 0, 4, _d.get("RB", 2))
+        n_wr = c1.number_input("WR", 0, 4, _d.get("WR", 2))
+        n_te = c2.number_input("TE", 0, 3, _d.get("TE", 1))
+        n_fx = c1.number_input("FLEX", 0, 3, _d.get("FLEX", 1))
         n_sf = c2.number_input("SUPERFLEX", 0, 2, 1 if superflex else 0)
-        n_k = c1.number_input("K", 0, 2, 1)
-        n_dst = c2.number_input("DST", 0, 2, 1)
-        bench = st.number_input("Bench", 0, 15, 6)
+        n_k = c1.number_input("K", 0, 2, _d.get("K", 1))
+        n_dst = c2.number_input("DST", 0, 2, _d.get("DST", 1))
+        bench = st.number_input("Bench", 0, 15, 12 if bb_mode else 6)
     starters = {"QB": n_qb, "RB": n_rb, "WR": n_wr, "TE": n_te,
                 "FLEX": n_fx, "SUPERFLEX": n_sf, "K": n_k, "DST": n_dst}
-    if rookie_mode:
+    if bb_mode:
+        cfg = LeagueConfig(teams=int(teams), scoring="ppr", superflex=False,
+                           starters=starters, bench=int(bench), my_slot=int(my_slot),
+                           snake=True, rounds=int(DK_BESTBALL["rounds"]),
+                           archetype="value", best_ball=True)
+    elif rookie_mode:
         cfg = LeagueConfig(teams=int(teams), scoring="ppr", starters=starters, bench=int(bench),
                            my_slot=int(my_slot), snake=not r_linear, rounds=int(r_rounds),
                            archetype="value")
@@ -246,9 +276,13 @@ with st.sidebar:
             cfg = LeagueConfig(teams=int(P["teams"]), scoring=P.get("scoring", "ppr"),
                                superflex=P.get("superflex", False), starters=st_p,
                                bench=int(P.get("bench", bench)), my_slot=slot_p,
-                               snake=P.get("snake", True), archetype=archetype)
+                               snake=P.get("snake", True), archetype=archetype,
+                               rounds=(int(P["rounds"]) if P.get("rounds") else None),
+                               best_ball=bool(P.get("best_ball", False)))
         if P.get("kind") == "rookie" and not rookie_mode:
             st.info("Dynasty rookie league — set **Draft type → Rookie** at the top.")
+        elif P.get("kind") == "bestball" and not bb_mode:
+            st.info("Best-ball league — set **Draft type → Best Ball** at the top.")
         elif P.get("kind") == "redraft" and rookie_mode:
             st.info("Redraft league — set **Draft type → Redraft** at the top.")
 
@@ -468,7 +502,19 @@ if not done:
 with st.expander("📋 Draft plan — simulate the rest of your draft"):
     st.caption("Monte-Carlo your remaining picks (opponents pick by ADP, you by your Strategy) "
                "to see your likely build path and where each position's value dries up.")
-    if st.button("Run / refresh plan", key="planbtn"):
+    if bb_mode:
+        # plan_draft picks its simulated future selves with effective_vor /
+        # roster_factor / need -- the redraft value model. In best ball the
+        # actual recommendation comes from bestball.py instead, so the plan
+        # would confidently describe a build the wizard will not make. A plan
+        # that contradicts the pick is worse than no plan, so it is disabled
+        # rather than shown with a caveat. (Porting it means routing its
+        # my-pick policy through _bb_values, the same one-helper rule that
+        # ROSTER_INTERP needed.)
+        st.info("Not available in Best Ball mode — the forward planner still "
+                "uses the redraft value model, so it would contradict the "
+                "recommendation. Tracked as a follow-up.")
+    elif st.button("Run / refresh plan", key="planbtn"):
         ss["plan"] = plan_draft(working, cfg, ss.drafted, n_sims=150)
     plan = ss.get("plan")
     if plan and plan.get("picks"):
@@ -494,6 +540,15 @@ with left:
         rows.append({
             "Player": p["name"], "Pos": f"{p['pos']}{p['posrank']}", "Tm": p.get("team"),
             "VOR": p["vor"], "Tier": f"{p['pos']}T{p['tier']}" if p.get("tier") else "",
+            # In best ball the pick is made on MARGINAL VALUE, not VOR. Showing
+            # only VOR would display one number while deciding on another --
+            # BB is the points he adds to your optimal weekly lineups, and Edge
+            # is that minus the man you would get at his position instead,
+            # which is what the board is actually sorted by.
+            **({"BB": p.get("bb"),
+                "Edge": (None if p.get("bb") is None
+                         else round(p["bb"] - (p.get("bb_repl") or 0.0)))}
+               if bb_mode else {}),
             "Surv%": round((p.get("survival") or 1) * 100),
             "ADP": p.get("adp"), "CoW": p.get("cost_of_waiting"),
             # Arc  = where OUR projection sits inside the comp distribution
@@ -506,10 +561,15 @@ with left:
             "Decl%": p.get("decl"),
         })
     df = pd.DataFrame(rows)
+    _grad = "Edge" if (bb_mode and "Edge" in df.columns) else "VOR"
+    _fmt = {"VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}", "Surv%": "{:.0f}",
+            "Decl%": "{:.0f}"}
+    if bb_mode:
+        _fmt.update({"BB": "{:.0f}", "Edge": "{:.0f}"})
     sty = (df.style
-           .background_gradient(subset=["VOR"], cmap="Greens")
+           .background_gradient(subset=[_grad], cmap="Greens")
            .background_gradient(subset=["Surv%"], cmap="RdYlGn")
-           .format({"VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}", "Surv%": "{:.0f}", "Decl%": "{:.0f}"}, na_rep="—"))
+           .format(_fmt, na_rep="—"))
     # the whole board is a pick control, not just the five chips above. Keying the
     # widget on the pick count gives each pick a FRESH selection -- otherwise the
     # row stays selected through the rerun and re-fires do_pick every time.
@@ -617,7 +677,11 @@ with right:
         st.dataframe(pd.DataFrame(tier_rows).sort_values(["Pos", "Tier"]),
                      width="stretch", hide_index=True, height=260)
 
-st.caption(f"{'Rookie' if rookie_mode else 'Redraft'} board: {len(working)} players · "
-           f"{res['board_size_remaining']} undrafted · "
-           + ("dynasty value (our model + age curve)" if rookie_mode
-              else "consensus = our model + Waldman blend, Clay ECR, FFC ADP"))
+_mode_lbl = "Rookie" if rookie_mode else ("Best Ball" if bb_mode else "Redraft")
+_basis = ("dynasty value (our model + age curve)" if rookie_mode else
+          ("marginal value added to your OPTIMAL WEEKLY LINEUP (ceiling, depth "
+           "and bye coverage priced in) · ⚠ not yet validated to beat the "
+           "redraft engine — see BB_REPL_WEIGHT in draft_engine.py" if bb_mode
+           else "consensus = our model + Waldman blend, Clay ECR, FFC ADP"))
+st.caption(f"{_mode_lbl} board: {len(working)} players · "
+           f"{res['board_size_remaining']} undrafted · " + _basis)
