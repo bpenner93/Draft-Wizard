@@ -907,27 +907,38 @@ def gen_field(pool, size, seed, sharp_frac=0.6, showdown=False, n_base=None, tea
     gwc = gw ** 3
     gwc = gwc / gwc.sum()
     n_sharp = int(size * sharp_frac)
-    lus = []
-    for _ in range(size * 3):
-        if len(lus) >= size:
+
+    # ⚠ REAL FIELDS SPEND THE CAP. Measured over 351 cached contests / 31.8M entries, the
+    # real field averages $49,127-$49,239 in the GPP tiers; a value-keyed greedy averages
+    # $46,244 because value/$1k rewards cheap players. An underspent field is a WEAK
+    # benchmark, which flatters every candidate scored against it.
+    # ⚠ The floor must be paired with the softened intensity: applied alone it selects for
+    # the CONCENTRATED lineups (they were the ones spending up) and the field's game stack
+    # went to 6.0 -- worse than the underspend it fixed.
+    # ⛔ AND IT MUST RELAX. As a FIXED $48,000 this silently destroyed the field on smaller
+    # slates -- 23 lineups built out of 800 on a 295-player pool, which trips solve()'s
+    # 50-lineup minimum and errors the whole solve, so the arm just vanished from those
+    # slates. Exactly the trap `sd_min_salary` already documents for showdown: gate on what
+    # the pool can REACH, and step down rather than fail.
+    def _pass(floor, target):
+        out = []
+        for _ in range(target * 3):
+            if len(out) >= target:
+                break
+            sharp = len(out) < int(target * sharp_frac)
+            sg = rng.choice(ugames, p=gwc) if rng.random() < (0.70 if sharp else 0.55) else None
+            key = (value if sharp else own) * rng.uniform(0.5 if not sharp else 0.65,
+                                                          1.5 if not sharp else 1.35,
+                                                          size=len(pool))
+            lu = _greedy(pos, sal, key, SALARY_CAP, rng, sg, games, intensity=FIELD_INTENSITY)
+            if lu and sal[lu].sum() >= floor:
+                out.append(lu)
+        return out
+
+    for floor in (48_000, 46_500, 45_000, 0):
+        lus = _pass(floor, size)
+        if len(lus) >= max(50, size * 0.5):
             break
-        sharp = len(lus) < n_sharp
-        sg = rng.choice(ugames, p=gwc) if rng.random() < (0.70 if sharp else 0.55) else None
-        key = (value if sharp else own) * rng.uniform(0.5 if not sharp else 0.65,
-                                                      1.5 if not sharp else 1.35, size=len(pool))
-        # FIELD_INTENSITY, not the old (1.4, 2.3). The game-key multiplier is scaled the
-        # same way it was for candidates: at (1.4, 2.3) a "game stack" is 4.7 players and
-        # at (2.6, 3.6) it is 7.8, against a REAL field that averages 2.6 from one game.
-        lu = _greedy(pos, sal, key, SALARY_CAP, rng, sg, games, intensity=FIELD_INTENSITY)
-        # ⚠ REAL FIELDS SPEND THE CAP. Measured over 351 cached contests / 31.8M entries,
-        # the real field averages $49,127-$49,239 in the GPP tiers; a value-keyed greedy
-        # averages $46,244 because value/$1k rewards cheap players. An underspent field is
-        # a WEAK benchmark, which flatters every candidate scored against it.
-        # ⚠ This floor must be paired with the softened intensity: applied on its own it
-        # selects for the CONCENTRATED lineups (they were the ones spending up), and the
-        # field's game stack went to 6.0 -- worse than the underspend it fixed.
-        if lu and sal[lu].sum() >= 48_000:
-            lus.append(lu)
     return _to_binary(lus, len(pool))
 
 
@@ -1580,7 +1591,18 @@ def solve(pool: pd.DataFrame, contest: dict, n_port: int = 20, n_sims: int = 800
                          showdown=showdown, n_base=n_base)
 
     if is_cash:
-        chosen = list(np.argsort(-fit_pay.mean(axis=0))[:n_port])
+        # ⭐ CASH RANKS BY PROJECTION, NOT BY SIMULATED PAYOUT (measured 2026-08-12).
+        # Ranking cash candidates by simulated payout lost to a plain max-projection ILP
+        # over 35 real double-ups / 32 slates: McNemar p=0.031 on 0/6 discordant slates
+        # (the ILP won six and lost none). The ILP was the only +EV arm there (+2.9% ROI,
+        # 51.4% cash rate, above break-even in all three seasons) and it reproduces the
+        # documented cash edge (p=.531 on the same 32-slate scale).
+        # Cash is decided at the ~44th-percentile cash line, so the objective is simply the
+        # highest expected score -- the payout curve is binary and adds only sampling noise
+        # to the ranking. This aligns the Solver's cash arm with the build the +EV cash
+        # result was actually measured on.
+        proj_v = pool["proj"].to_numpy(dtype=float)
+        chosen = list(np.argsort(-(cand_bin[:, :n_base] @ proj_v))[:n_port])
         alts = {}
     else:
         chosen = solve_portfolio(fit_pay, n_port, cand_bin=cand_bin, max_exposure=max_exposure)
