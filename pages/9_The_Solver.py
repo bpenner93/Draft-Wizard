@@ -168,10 +168,17 @@ with st.expander("⚙️ Advanced"):
     max_expo = a1.slider("Max player exposure", 0.1, 1.0, 0.6, 0.05,
                          help="Cap any one player's share of the portfolio, so a single "
                               "bust can't sink every entry.")
-    use_band = a2.toggle("Own-band the candidates", value=not showdown,
-                         help="Winning GPP lineups cluster near ~150 cumulative ownership. "
-                              "Left free the solver drifts over-contrarian (~95).")
-    band = a2.slider("Cumulative ownership band", 50, 250, (110, 175), disabled=not use_band)
+    use_band = a2.toggle("Target the ownership band", value=not showdown,
+                         help="Measured over 351 real contests / 31.8M entries, realized "
+                              "GPP ROI by cumulative ownership: under 100 → −48.7%, "
+                              "120-140 → −12.1%, 140-160 → +5.4%, 180+ → −1.3% (duplication "
+                              "eats the top: 6.97 mean copies per lineup above 180 own in a "
+                              "100k field, vs 1.05 below 100). The solver now TUNES a chalk "
+                              "bonus toward this band rather than filtering candidates to "
+                              "it — the old filter no-opped, because only 17 of 600 "
+                              "candidates could reach it. It reports what it achieved.")
+    band = a2.slider("Cumulative ownership band", 50, 250, S.OWN_BAND_DEFAULT,
+                     disabled=not use_band)
     se_gpp = (max_entries <= 1 and contest["kind"] == "gpp")
     no_stack = a3.toggle("Max-proj build (no forced stack)", value=se_gpp,
                          help="Single-entry tournaments want MAX-PROJECTION, not the "
@@ -179,15 +186,18 @@ with st.expander("⚙️ Advanced"):
                               "slates. A portfolio exists to cover outcomes across many "
                               "entries; with one entry you want the single highest-EV "
                               "lineup, and a forced QB stack wrecks its floor.")
-    corr = a3.selectbox("Correlation model", ["factor", "matrix", "tcopula"], index=0,
-                        help="factor (default, and the validated one) = uniform game+team "
-                             "loading. It is 'wrong' on linear correlation yet performs "
-                             "BETTER on the real field, because its high same-team loading "
-                             "captures the tail co-movement (co-boom) that GPP ceiling "
-                             "depends on. matrix = the measured Pearson structure. "
-                             "tcopula = measured structure plus tail dependence — it needs "
-                             "scipy, which is NOT installed on Streamlit Cloud, so there it "
-                             "silently falls back to 'matrix'.")
+    corr = a3.selectbox("Correlation model", ["matrix", "factor", "tcopula"], index=0,
+                        help="matrix (default) = the measured DK pair structure. "
+                             "factor was the old default and is FALSIFIED: it puts the "
+                             "same 0.607 correlation on every same-team pair, where the "
+                             "realized values are QB-WR 0.33 and QB-TE 0.32 but WR-WR "
+                             "0.01 and RB-RB −0.04 — team co-movement is only the "
+                             "QB↔pass-catcher link. Against 311 real fields, matrix "
+                             "reproduces the field's score dispersion (sd/mean 0.200 vs "
+                             "0.190) while factor over-disperses by 23%. tcopula adds "
+                             "GLOBAL tail dependence, which over-corrects every non-QB "
+                             "pair; it also needs scipy, absent on Streamlit Cloud, where "
+                             "it silently falls back to matrix.")
 
 if st.button("⚡ Solve", type="primary", width="stretch"):
     with st.spinner(f"simulating {n_sims:,} outcomes across {n_cand:,} constructions…"):
