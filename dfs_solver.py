@@ -136,7 +136,8 @@ def _corr_matrix(pool: pd.DataFrame) -> np.ndarray:
 
 
 def sim_scores(pool: pd.DataFrame, n_sims: int, seed: int, corr: str = "matrix",
-               a_team: float = 0.68, a_game: float = 0.38) -> np.ndarray:
+               a_team: float = 0.68, a_game: float = 0.38,
+               qbtail_df: float = 6.0) -> np.ndarray:
     """[n_sims, n_players] correlated DK draws: lognormal marginals (mean = proj,
     position CV) through a copula.
 
@@ -165,12 +166,30 @@ def sim_scores(pool: pd.DataFrame, n_sims: int, seed: int, corr: str = "matrix",
     GPP ROI comparison, which cannot discriminate in a format whose median week is
     -100% and where one week has swung a variant by +3233%.
 
-    ⚠ REMAINING, MEASURED, NOT YET BUILT: a Gaussian copula at the measured rho does
-    under-model the QB-axis tail specifically -- QB-WR co-boom 2.29x simulated vs
-    2.93x realized. A GLOBAL t-copula is the wrong repair (t5 gives 1.55x on WR-WR
-    against a realized 1.03x, and 1.35x on RB-RB against 0.72x): it fixes the QB pairs
-    and breaks every other pair. The right fix is tail dependence on the QB ->
-    pass-catcher axis ONLY.
+    ⚠ REMAINING, MEASURED, AND TWO REPAIRS TRIED AND REJECTED (2026-08-13). A Gaussian
+    copula at the measured rho under-models the QB-axis tail. Co-boom = P(both above
+    their own 90th pct) / 0.01, against REALIZED QB-WR 2.93 / WR-WR 1.03 / RB-RB 0.72:
+
+        model              QB-WR r   QB-WR co   WR-WR co   RB-RB co
+        matrix (shipped)     0.342       2.37       1.16       0.78
+        t-copula, global     0.338       2.89       1.67       1.26
+        per-team block t     0.342       2.82       1.58       0.78
+        pairwise featured    0.325       2.37       1.16       0.78
+
+    A GLOBAL t-copula nails the QB pairs and breaks everything else. Confining the SAME
+    mixing variable to each team's {QB, WR, TE} block only localises that over-correction
+    -- one shared chi-square couples every member, so WR-WR goes to 1.58.
+    ⛔ Making the shock PAIRWISE (each sim, one "featured" pass-catcher drawn on projection
+    share, shocked together with the QB) fails differently: NO lift at all, and it DILUTED
+    the linear correlation to 0.286. The QB is scaled every sim by a factor his pass-catcher
+    shares only ~1/4 of the time, which injects QB-specific variance and DECOUPLES the pair
+    instead of coupling it.
+    ⭐ The remaining untried mechanism is STRUCTURAL, not a copula hack: build the QB's latent
+    as a weighted SUM of his pass-catchers' latents plus idiosyncratic noise -- which is what
+    a QB's points literally are. Heavy tails in the pass-catchers then propagate to the QB,
+    giving QB-WR tail dependence while the pass-catchers stay independent of each other.
+    Until that exists, `matrix` is the best available compromise: it is the closest of
+    everything tested on the COMBINATION of the four statistics.
 
     corr='factor'  = the old uniform game+team factor, kept for A/B only.
     corr='tcopula' = measured structure plus GLOBAL tail dependence; needs scipy and
@@ -183,6 +202,44 @@ def sim_scores(pool: pd.DataFrame, n_sims: int, seed: int, corr: str = "matrix",
     s2 = np.log(1 + cv ** 2)
     s = np.sqrt(s2)
     m = np.log(proj) - s2 / 2
+
+    if corr == "qbtail":
+        # ⭐ TAIL DEPENDENCE ON THE QB AXIS ONLY.
+        # The Gaussian copula gets the LINEAR structure right but under-models how often a
+        # QB and his own pass-catcher boom TOGETHER: measured P(both above their own 90th
+        # pct)/0.01 is 2.93x realized against 2.29x simulated. A GLOBAL t-copula is the wrong
+        # repair -- it lifts every pair, giving 1.55x on WR-WR against a realized 1.03x and
+        # 1.35x on RB-RB against 0.72x. So the chi-square mixing variable is shared ONLY
+        # within each team's {QB + WR/TE} block, with an independent draw per team; everyone
+        # else stays Gaussian. `qbtail_df` sets the strength (lower = fatter).
+        teams_a = pool["team"].astype(str).to_numpy()
+        pos_a = pool["position"].astype(str).str.upper().to_numpy()
+        L = np.linalg.cholesky(_corr_matrix(pool))
+        latent = rng.standard_normal((n_sims, len(pool))) @ L.T
+        # ⛔ THE SHOCK MUST BE PAIRWISE, NOT PER-BLOCK. Sharing one mixing variable across
+        # {QB, WR, TE} couples every member, so WR-WR co-boom rose 1.16 -> 1.58 against a
+        # realized 1.03 -- the same over-correction the global t-copula makes, just confined
+        # to a team. Instead: each sim, each team features ONE pass-catcher (drawn on
+        # projection share), and only the QB and THAT player share the shock. Two WRs are
+        # never featured together, so the WR-WR tail is left alone while every QB-WR pair
+        # still gets tail dependence averaged over who is featured -- which is also the real
+        # mechanism, since a QB's points ARE his pass-catchers' points and only some of them
+        # get the touchdowns on any given Sunday.
+        df_t = max(2.5, float(qbtail_df))
+        scale = np.sqrt(df_t / (df_t - 2.0))          # E[factor^2] = 1 -> variance preserved
+        rows = np.arange(n_sims)
+        for t in pd.unique(teams_a):
+            q = np.where((teams_a == t) & (pos_a == "QB"))[0]
+            pc = np.where((teams_a == t) & np.isin(pos_a, ["WR", "TE"]))[0]
+            if not len(q) or not len(pc):
+                continue
+            w = rng.chisquare(df_t, size=n_sims)
+            factor = np.sqrt(df_t / w) / scale
+            pw = np.maximum(pool["proj"].to_numpy(dtype=float)[pc], 0.1)
+            feat = rng.choice(pc, size=n_sims, p=pw / pw.sum())
+            latent[:, q[0]] *= factor
+            latent[rows, feat] *= factor
+        return np.exp(m[None, :] + s[None, :] * latent)
 
     if corr == "tcopula":
         try:
@@ -1269,6 +1326,64 @@ def tier_of(size: int, kind: str, entries: int = 1, showdown: bool = False) -> s
 
 # ── 5. equity: candidates vs the simulated field, through the payout curve ────
 
+# ⭐ MEASURED DUPLICATION. Mean duplicate entries per DISTINCT lineup, from 351 real cached
+# contests / 31.8M entries, by cumulative ownership and field size. The Solver previously
+# reported duplication only as a unitless RANK, with the honest note that the textbook
+# independent-rostering estimate "comes out ~100x low". These are the real counts.
+#
+#   cum own      <5k   5-30k   30-100k   100k+
+#     <100      1.97    1.01      1.03    1.05
+#   100-120     1.01    1.01      1.03    1.06
+#   120-140     1.01    1.01      1.08    1.18
+#   140-160     1.01    1.01      1.18    1.50
+#   160-180     1.01    1.03      1.50    2.64
+#     180+      1.09    1.23      2.30    6.97      (worst single lineup: 409 copies)
+#
+# This is WHY realized ROI stops improving above ~170 cum own even though it climbs steadily
+# below that: duplication is the cost side of chalk, and it only bites in big fields.
+_DUP_OWN = np.array([90., 110., 130., 150., 170., 200.])
+_DUP_SIZE = np.array([5_000., 30_000., 100_000., 400_000.])
+_DUP_TAB = np.array([
+    [1.97, 1.01, 1.03, 1.05],
+    [1.01, 1.01, 1.03, 1.06],
+    [1.01, 1.01, 1.08, 1.18],
+    [1.01, 1.01, 1.18, 1.50],
+    [1.01, 1.03, 1.50, 2.64],
+    [1.09, 1.23, 2.30, 6.97],
+])
+
+
+def expected_dupes(cum_own, field_size: int) -> np.ndarray:
+    """Expected duplicate entries of a lineup, in ENTRIES -- interpolated from the measured
+    table. Bilinear in cumulative ownership and log field size, clamped at the edges."""
+    own = np.atleast_1d(np.asarray(cum_own, dtype=float))
+    si = float(np.clip(np.interp(np.log10(max(float(field_size), 1000.0)),
+                                 np.log10(_DUP_SIZE), np.arange(len(_DUP_SIZE))),
+                       0, len(_DUP_SIZE) - 1))
+    lo, hi = int(np.floor(si)), int(min(np.ceil(si), len(_DUP_SIZE) - 1))
+    w = si - lo
+    col = _DUP_TAB[:, lo] * (1 - w) + _DUP_TAB[:, hi] * w
+    return np.interp(own, _DUP_OWN, col)
+
+
+def dup_adjusted_pay(pbr: np.ndarray, rank0: np.ndarray, k: np.ndarray) -> np.ndarray:
+    """Payout per entry when a lineup is duplicated k times.
+
+    DK splits the AGGREGATE prize across tied identical lineups, so k copies landing at rank
+    r share the sum of the prizes for ranks r..r+k-1 -- on a top-heavy curve that is a real
+    haircut, not a rounding error. At 180+ cum own in a 100k+ field the measured k is 6.97,
+    so a lineup that "wins" collects about a seventh of the aggregate of the top seven
+    prizes, which is far less than first place.
+    """
+    M = len(pbr)
+    cs = np.concatenate([[0.0], np.cumsum(pbr)])
+    k = np.maximum(np.rint(k).astype(int), 1)
+    lo = np.clip(rank0, 0, M)
+    hi = np.clip(rank0 + k, 0, M)
+    span = np.maximum(hi - lo, 1)
+    return (cs[hi] - cs[lo]) / span
+
+
 def cand_payouts(cand_scores: np.ndarray, field_scores: np.ndarray,
                  pay_by_rank: np.ndarray, field_size: int) -> np.ndarray:
     """[n_sims, n_cand] payout per candidate per sim.
@@ -1292,7 +1407,8 @@ def cand_payouts(cand_scores: np.ndarray, field_scores: np.ndarray,
 
 
 def lineup_metrics(cand_pay, cand_ranks, cand_scores, cand_bin, pool, entry_fee,
-                   field_size, showdown=False, n_base=None, field_entries=None):
+                   field_size, showdown=False, n_base=None, field_entries=None,
+                   pay_by_rank=None):
     """Per-candidate equity table -- the numbers the UI ranks and shows.
 
     ev / roi           expected payout per entry, and ROI on the entry fee (SIM)
@@ -1327,7 +1443,23 @@ def lineup_metrics(cand_pay, cand_ranks, cand_scores, cand_bin, pool, entry_fee,
         logp = cand_bin @ np.log(np.clip(own / 100.0, 1e-4, 1.0))
     dup_rank = pd.Series(logp).rank(pct=True).to_numpy() * 100.0
 
-    return pd.DataFrame({"ev": ev, "roi": roi, "p_cash": p_cash, "p_top1": p_top1,
+    # ⭐ AND NOW IN UNITS. `dupes` is the expected number of copies of this lineup in the
+    # field, interpolated from 351 real contests (see expected_dupes). `ev_dup` re-prices
+    # every sim's payout for the prize-splitting that duplication causes -- DK splits the
+    # aggregate prize across tied identical lineups, so k copies at rank r share the sum of
+    # ranks r..r+k-1. Reported ALONGSIDE the raw ev rather than replacing it, so the size of
+    # the haircut is visible instead of buried.
+    dupes = expected_dupes(cum_own, field_size)
+    if pay_by_rank is not None and cand_ranks is not None:
+        pbr = np.sort(np.asarray(pay_by_rank, dtype=float))[::-1]
+        r0 = np.clip(cand_ranks.astype(int) - 1, 0, len(pbr))
+        ev_dup = dup_adjusted_pay(pbr, r0, np.broadcast_to(dupes, r0.shape)).mean(axis=0)
+    else:
+        ev_dup = ev
+    roi_dup = (ev_dup - entry_fee) / entry_fee * 100.0 if entry_fee else np.zeros_like(ev_dup)
+
+    return pd.DataFrame({"ev": ev, "roi": roi, "ev_dup": ev_dup, "roi_dup": roi_dup,
+                         "dupes": dupes, "p_cash": p_cash, "p_top1": p_top1,
                          "p_win": p_win, "med": med, "p90": p90, "own": cum_own,
                          "salary": salary, "dup_risk": dup_rank})
 
@@ -1588,7 +1720,7 @@ def solve(pool: pd.DataFrame, contest: dict, n_port: int = 20, n_sims: int = 800
 
     met = lineup_metrics(eval_pay, eval_ranks, eval_scores, cand_bin, pool,
                          float(contest["fee"]), int(contest["size"]),
-                         showdown=showdown, n_base=n_base)
+                         showdown=showdown, n_base=n_base, pay_by_rank=pbr)
 
     if is_cash:
         # ⭐ CASH RANKS BY PROJECTION, NOT BY SIMULATED PAYOUT (measured 2026-08-12).
