@@ -90,6 +90,17 @@ def check_board():
         bad(f"duplicate player ids (Streamlit key collisions): {dup}")
     else:
         ok("player ids unique")
+    # ⭐ a synthesized id must come from the player's IDENTITY, not from his row
+    # index. The old `f"{pos}-{team}-{i}"` moved whenever upstream ordering
+    # shifted, so two builds of identical data differed on 21 ids -- the board
+    # could not be verified by id-diff and every rebuild carried a spurious diff.
+    import re as _re
+    positional = [i for i in ids if _re.fullmatch(r"[A-Z]{1,4}-[A-Z]{2,3}-\d+", str(i))]
+    if positional:
+        bad(f"{len(positional)} ids use the POSITIONAL scheme (e.g. {positional[:3]}) — "
+            f"they change on every rebuild; see _slug() in export_draft_board.py")
+    else:
+        ok("synthesized ids are identity-derived (stable across rebuilds)")
 
     top = sorted([x for x in players if x.get("adp")], key=lambda x: x["adp"])[:24]
     if len(top) < 24:
