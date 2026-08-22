@@ -93,6 +93,11 @@ st.markdown("""
   .dw-sub {color:#94a3b8;font-size:12px;margin-top:6px;}
   .dw-h {color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.07em;
          font-weight:700;margin:10px 0 4px 0;}
+  /* Streamlit buttons break on any character, so a stretched button in a narrow
+     column renders its label one letter per line -- the quick-pick chips were a
+     vertical alphabet on a 958px laptop. Truncate instead. */
+  .stButton button p {white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                      word-break: keep-all;}
 </style>""", unsafe_allow_html=True)
 
 
@@ -407,7 +412,11 @@ with st.sidebar:
                 _drift.append(f"rounds → {int(_sc['rounds'])}")
             cfg.rounds = int(_sc["rounds"])
         ss["cfg_drift"] = _drift
-        st.caption(f"📲 **{_sc.get('league_name') or 'Sleeper'}** · {_sc.get('type', '?')} · "
+        # ⚠ .strip(): Sleeper league names can carry a trailing space
+        # ("ReDrafters Rejoice "), and markdown will not close a bold run when the
+        # closing ** is preceded by whitespace -- the live app rendered the
+        # asterisks literally.
+        st.caption(f"📲 **{(_sc.get('league_name') or 'Sleeper').strip()}** · {_sc.get('type', '?')} · "
                    f"slot {cfg.my_slot} · {cfg.total_rounds()} rds · "
                    + ("SUPERFLEX" if cfg.superflex else "1QB"))
 
@@ -657,10 +666,11 @@ with main:
             chip_note = f"who {seat_name(res['on_clock'])} took — likeliest by ADP"
         st.markdown(f'<div class="dw-h">Quick mark — {chip_note}</div>',
                     unsafe_allow_html=True)
-        chips = st.columns(5)
+        chips = st.columns(len(shortlist) or 1)
         for i, a in enumerate(shortlist):
-            if chips[i].button(f"{a['name'].split()[-1]} · {a['pos']}", key=f"chip_{i}",
-                               width="stretch"):
+            if chips[i].button(a["name"].split()[-1], key=f"chip_{i}", width="stretch",
+                               help=f"{a['name']} · {a['pos']}{a.get('posrank','')} "
+                                    f"· {a.get('team') or ''}"):
                 do_pick(a["id"]); st.rerun()
 
 with side:

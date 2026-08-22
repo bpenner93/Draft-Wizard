@@ -106,6 +106,27 @@ SUPERFLEX_SPLIT = {"QB": 0.80, "RB": 0.05, "WR": 0.12, "TE": 0.03}
 # recommendation weights (VOR-point units) -- the knobs to tune the pick analyzer
 W_SCARCITY = 1.0    # weight on cost-of-waiting (tier cliff before your next pick)
 W_NEED     = 1.0    # weight on roster-need bonus
+
+# ── value model ───────────────────────────────────────────────────────────────
+# "mean"   : _vor = season points - replacement's season points. The shipped model;
+#            every verdict on record was measured under it. Bit-identical default.
+# "option" : _vor = sum over weeks of E[max(0, X_player - X_repl)], with X a weekly
+#            gamma draw (flat FITTED position CV from bestball.WEEKLY_CV) gated by
+#            availability, and X_repl the SAME replacement player the mean model
+#            uses, drawn the same way. The redraft start/sit option priced
+#            explicitly: a bench player is worth what he adds in the weeks he beats
+#            the alternative, never what he costs in the weeks he does not. The
+#            functional is convex, so value rises with variance -- and it is >= 0
+#            everywhere, so the whole sub-replacement tail (where mean VOR is
+#            negative for every player from ~round 9 on) is re-ordered by how
+#            often each man clears the bar rather than by how far below it he sits.
+#            ⚠ INPUTS ARE DELIBERATELY UNCHANGED: flat position CV, same means,
+#            same availability. Only the OBJECTIVE differs, so draft_tune measures
+#            the functional and nothing else. The evaluated quantity is an exact
+#            1-D quadrature (no MC noise), so the value is deterministic and cheap
+#            enough for the ~30 compute_values calls a live draft makes.
+VALUE_MODEL = "mean"
+OPTION_GRID_N = 600     # quadrature nodes for E[min(X_p, X_r)] = int sf_p * sf_r dt
 # Damp cost-of-waiting by the SAME roster_factor that damps VOR.
 # ⭐ THIS IS A BUG FIX, not a preference. cost_of_waiting is POSITIONAL, so
 # without this it fires at full weight no matter how many of that position you
@@ -256,8 +277,11 @@ def compute_values(board: list[dict], cfg: LeagueConfig) -> None:
         plist.sort(key=lambda x: -x["_pts"])
         r = repl.get(pos, len(plist))
         repl_pts[pos] = plist[r - 1]["_pts"] if len(plist) >= r else (plist[-1]["_pts"] if plist else 0.0)
-    for p in board:
-        p["_vor"] = round(p["_pts"] - repl_pts.get(p["pos"], 0.0), 1)
+    if VALUE_MODEL == "option":
+        _option_vor(board, by_pos, repl)
+    else:
+        for p in board:
+            p["_vor"] = round(p["_pts"] - repl_pts.get(p["pos"], 0.0), 1)
     board.sort(key=lambda x: -x["_vor"])
     for i, p in enumerate(board, 1):
         p["_ovr"] = i
@@ -266,6 +290,66 @@ def compute_values(board: list[dict], cfg: LeagueConfig) -> None:
         posc[p["pos"]] += 1
         p["_posrank"] = posc[p["pos"]]
     _assign_tiers(by_pos)
+
+
+def _weekly_mu_q(p: dict, weeks: int = 17) -> tuple[float, float]:
+    """(per-game mean in LEAGUE points, P(plays a given week)) -- the same
+    decomposition bestball.weekly_params uses, on the rescored `_pts`."""
+    games = float(p.get("games") or weeks)
+    games = min(max(games, 1.0), float(weeks))
+    mu = max(float(p.get("_pts") or 0.0), 0.0) / games
+    return mu, games / float(weeks)
+
+
+def _option_vor(board: list[dict], by_pos: dict[str, list], repl: dict,
+                weeks: int = 17) -> None:
+    """Attach `_vor` = season option value over the positional replacement.
+
+    Per week, with p and r independent, X = (plays ? Gamma(k, mu/k) : 0):
+        E[max(0, X_p - X_r)] = q_p (1 - q_r) mu_p  +  q_p q_r (mu_p - E[min(G_p, G_r)])
+        E[min(G_p, G_r)]     = int_0^inf sf_p(t) sf_r(t) dt
+    Same shape k = 1/cv^2 for everyone at a position (flat fitted CV), different
+    scale. The integral is evaluated on a fixed grid per position, vectorised
+    across players -- exact up to quadrature, no random numbers.
+
+    K/DST keep the mean model: their "VOR" is not real value (see roster_factor)
+    and bestball carries no fitted CV for them."""
+    from scipy.special import gammaincc
+
+    for pos, plist in by_pos.items():
+        r = repl.get(pos, len(plist))
+        plist.sort(key=lambda x: -x["_pts"])
+        if not plist:
+            continue
+        rp = plist[r - 1] if len(plist) >= r else plist[-1]
+        cv = bb.WEEKLY_CV.get(pos)
+        if cv is None or pos in ("K", "DST"):
+            base = rp["_pts"]
+            for p in plist:
+                p["_vor"] = round(p["_pts"] - base, 1)
+            continue
+        k = 1.0 / (cv * cv)
+        mu_r, q_r = _weekly_mu_q(rp, weeks)
+        mus = np.array([_weekly_mu_q(p, weeks)[0] for p in plist])
+        qs = np.array([_weekly_mu_q(p, weeks)[1] for p in plist])
+        if mu_r <= 0:
+            for p, mu, q in zip(plist, mus, qs):
+                p["_vor"] = round(float(weeks * q * mu), 1)
+            continue
+        # grid to the far tail of the LARGEST scale in the room; sf is ~0 beyond
+        top = float(max(mus.max(), mu_r)) / k
+        t_hi = top * (k + 12.0 * np.sqrt(k))          # ~ mean + 12 sd of the widest gamma
+        grid = np.linspace(0.0, t_hi, OPTION_GRID_N)
+        sf_r = gammaincc(k, grid / (mu_r / k))
+        pos_mask = mus > 0
+        emin = np.zeros(len(plist))
+        if pos_mask.any():
+            scales = (mus[pos_mask] / k)[:, None]
+            sf_p = gammaincc(k, grid[None, :] / scales)          # (n, grid)
+            emin[pos_mask] = np.trapz(sf_p * sf_r[None, :], grid, axis=1)
+        week = qs * (1.0 - q_r) * mus + qs * q_r * (mus - emin)
+        for p, w in zip(plist, week):
+            p["_vor"] = round(float(weeks * max(w, 0.0)), 1)
 
 
 def _assign_tiers(by_pos: dict[str, list]) -> None:

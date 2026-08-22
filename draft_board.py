@@ -57,7 +57,7 @@ def slot_team(cfg, state, slot: int, short: bool = False) -> str:
     if state:
         rid = (state.get("slot_to_roster") or {}).get(slot)
         nm = (state.get("roster_team") or {}).get(rid)
-    nm = nm or f"Team {slot}"
+    nm = (nm or "").strip() or f"Team {slot}"
     return _short(nm, 11) if short else _esc(nm)
 
 
@@ -234,18 +234,25 @@ def on_deck_html(cfg, state, current_overall: int, my_next: int | None,
             bg, col, tag = "#422006", GOLD, "ON THE CLOCK"
         else:
             bg, col, tag = FIELD, INK, (f"needs {want}" if want else "")
+        # ⚠ the TEAM NAME is the point of this panel, so it gets the flexible
+        # space and everything else is fixed. `min-width:0` is required or the
+        # flex item refuses to shrink below its content and pushes the tag off
+        # the row instead of ellipsising -- at a 196px column that turned every
+        # opponent into "F…". The overall pick number rides with the label
+        # rather than taking a column of its own.
         rows += (
-            f'<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;'
+            f'<div style="display:flex;align-items:baseline;gap:7px;padding:5px 8px;'
             f'background:{bg};border-left:3px solid {GOLD if live else (MINE if is_me else LINE)};'
             f'border-bottom:1px solid {LINE};font-size:12px">'
-            f'<span style="color:{MUTE};min-width:38px;font-variant-numeric:tabular-nums">'
-            f'{pick_label(cfg, p)}</span>'
-            f'<span style="color:{MUTE};min-width:34px;font-size:11px">#{p}</span>'
-            f'<span style="color:{col};flex:1;font-weight:{600 if (live or is_me) else 400};'
-            f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{_esc(nm)}'
-            f'{" ⇄" if traded else ""}</span>'
-            f'<span style="color:{GOLD if (live or is_me) else MUTE};font-size:11px;'
-            f'white-space:nowrap">{_esc(tag)}</span></div>')
+            f'<span style="color:{MUTE};flex:0 0 auto;font-variant-numeric:tabular-nums">'
+            f'{pick_label(cfg, p)}'
+            f'<span style="font-size:9px;opacity:.7"> #{p}</span></span>'
+            f'<span style="color:{col};flex:1 1 auto;min-width:0;'
+            f'font-weight:{600 if (live or is_me) else 400};'
+            f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap"'
+            f' title="{_esc(nm)}">{_esc(nm)}{" ⇄" if traded else ""}</span>'
+            f'<span style="color:{GOLD if (live or is_me) else MUTE};font-size:10px;'
+            f'flex:0 0 auto;white-space:nowrap">{_esc(tag)}</span></div>')
         n += 1
     more = ""
     if my_next and my_next > current_overall + max_rows - 1:
