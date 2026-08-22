@@ -106,6 +106,22 @@ def get_board():
     return load_board()
 
 
+# ⚠ NOT `name.split()[-1]`. Roughly one in twenty draftable players carries a
+# generational suffix, so that renders Marvin Harrison Jr. as a chip labelled
+# "Jr. · WR" -- and there are three different Jr.s inside the top 80, so the
+# label is not just ugly, it is ambiguous. Seen live in a mock at pick 63.
+_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
+
+
+def surname(name: str) -> str:
+    parts = [x for x in str(name or "").split() if x]
+    if parts and parts[-1].upper() in ("DST", "D/ST", "DEF"):
+        return " ".join(parts)          # "SEA DST", not "DST"
+    while len(parts) > 1 and parts[-1].lower().strip(".") in {s.strip(".") for s in _SUFFIXES}:
+        parts.pop()
+    return parts[-1] if parts else str(name or "")
+
+
 def arc_flag(p) -> str:
     """Compact signal for the board. A HIGH percentile means we are projecting
     ABOVE what comparable players actually did -- a caution, not praise.
@@ -655,11 +671,14 @@ with main:
 
 
 with side:
-    st.markdown('<div class="dw-h">🕐 On deck — who picks before you</div>',
-                unsafe_allow_html=True)
-    st.markdown(on_deck_html(cfg, sstate, res["current_overall"], res["my_next_pick"],
-                             res["opponents"].get("seat_need"), max_rows=13),
-                unsafe_allow_html=True)
+    # nobody is on the clock once the last pick is in -- the panel used to show
+    # "15.12 ON THE CLOCK" on a completed draft
+    if not done:
+        st.markdown('<div class="dw-h">🕐 On deck — who picks before you</div>',
+                    unsafe_allow_html=True)
+        st.markdown(on_deck_html(cfg, sstate, res["current_overall"], res["my_next_pick"],
+                                 res["opponents"].get("seat_need"), max_rows=13),
+                    unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------- quick mark
 # A tap always books the pick for whoever is ON THE CLOCK, and the two cases want
@@ -680,7 +699,7 @@ if rec and not done:
                 unsafe_allow_html=True)
     chips = st.columns(len(shortlist) or 1)
     for i, a in enumerate(shortlist):
-        if chips[i].button(f"{a['name'].split()[-1]} · {a['pos']}", key=f"chip_{i}",
+        if chips[i].button(f"{surname(a['name'])} · {a['pos']}", key=f"chip_{i}",
                            width="stretch",
                            help=f"{a['name']} · {a['pos']}{a.get('posrank','')} "
                                 f"· {a.get('team') or ''}"):
@@ -761,6 +780,15 @@ if True:
             "Decl%": p.get("decl"),
         })
     df = pd.DataFrame(rows)
+    # ⚠ a column with ANY None becomes object dtype, and Styler's `na_rep` only
+    # replaces NaN -- so a player with no ADP rendered the literal string "None"
+    # in ADP and vsADP on the live board. Coerce first; then None becomes NaN and
+    # na_rep works. Same root cause as `Bye`: a display path that is fine until
+    # one row is missing.
+    for _c in ("Bye", "Score", "VOR", "Surv%", "ADP", "vsADP", "CoW", "Decl%",
+               "BB", "Edge"):
+        if _c in df.columns:
+            df[_c] = pd.to_numeric(df[_c], errors="coerce")
     if _compact:
         _keep = ["Player", "Pos", "Score", "Tier", "Surv%", "vsADP"]
         if bb_mode:
@@ -771,10 +799,24 @@ if True:
             "Surv%": "{:.0f}", "Decl%": "{:.0f}", "vsADP": "{:+.0f}", "Bye": "{:.0f}"}
     if bb_mode:
         _fmt.update({"BB": "{:.0f}", "Edge": "{:.0f}"})
-    sty = (df.style
-           .background_gradient(subset=[_grad], cmap="Greens")
-           .background_gradient(subset=["Surv%"], cmap="RdYlGn")
-           .background_gradient(subset=["vsADP"], cmap="PuOr")
+    def _grad_ok(col):
+        """A gradient needs SPREAD. On a constant column matplotlib maps every
+        cell to the bottom of the colormap, so a post-draft board where every
+        Surv% is 100 rendered solid dark red -- reading as 'nobody survives' when
+        it means the opposite."""
+        if col not in df.columns:
+            return False
+        v = pd.to_numeric(df[col], errors="coerce").dropna()
+        return len(v) > 1 and v.nunique() > 1
+
+    sty = df.style
+    if _grad_ok(_grad):
+        sty = sty.background_gradient(subset=[_grad], cmap="Greens")
+    if _grad_ok("Surv%"):
+        sty = sty.background_gradient(subset=["Surv%"], cmap="RdYlGn")
+    if _grad_ok("vsADP"):
+        sty = sty.background_gradient(subset=["vsADP"], cmap="PuOr")
+    sty = (sty
            .format({k: v for k, v in _fmt.items() if k in df.columns}, na_rep="—"))
     # Pin the name so it stays put while the numbers scroll. Without this a phone
     # user scrolls right to read Surv% and can no longer see WHOSE it is.
@@ -962,7 +1004,7 @@ with t_plan:
             "Target": p["top_pos"],
             "Conf": f"{int(max(p['pos_probs'].values())*100)}%" if p["pos_probs"] else "",
             "ExpVOR": p["exp_vor"],
-            "Often there": ", ".join(e.split()[-1] for e in p["examples"]),
+            "Often there": ", ".join(surname(e) for e in p["examples"]),
         } for p in plan["picks"][:14]]
         st.dataframe(pd.DataFrame(prows), hide_index=True, width="stretch")
 

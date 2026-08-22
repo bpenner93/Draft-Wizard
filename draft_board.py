@@ -38,11 +38,25 @@ def _esc(s) -> str:
             .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+# a generational suffix is not part of the name you read on a draft board, and
+# dropping it is what buys the room to show the rest ("M. Harrison Jr." vs
+# "M. Harrison"). Also see surname() in draft_app.
+_SUFFIX = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
 def _short(name: str, n: int = 13) -> str:
     """`Amon-Ra St. Brown` -> `A. St. Brown`, then hard-truncate."""
-    parts = str(name or "").split()
+    parts = [x for x in str(name or "").split() if x]
+    # ⚠ a defense is named by its TEAM ("SEA DST"), so initialising the first
+    # token turns it into "S. DST" -- which identifies nothing. Leave them whole.
+    if parts and parts[-1].upper() in ("DST", "D/ST", "DEF"):
+        return _esc(" ".join(parts))
+    while len(parts) > 2 and parts[-1].lower().strip(".") in _SUFFIX:
+        parts.pop()
     if len(parts) >= 2:
         name = f"{parts[0][:1]}. {' '.join(parts[1:])}"
+    elif parts:
+        name = parts[0]
     return _esc(name if len(name) <= n else name[: n - 1] + "…")
 
 
