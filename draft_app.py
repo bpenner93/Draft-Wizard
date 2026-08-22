@@ -830,8 +830,17 @@ if True:
     # so Player is pinned (below) and this drops to the six columns you actually
     # draft off. Not auto-detected: Streamlit renders server-side and has no
     # viewport width, so guessing would be wrong on a tablet either way.
-    _compact = bh[1].toggle("Compact", value=False, key="compact_cols",
-                            help="Fewer columns — fits a phone screen without scrolling.")
+    _tg = bh[1].columns(2)
+    _compact = _tg[0].toggle("Compact", value=False, key="compact_cols",
+                             help="Fewer columns — fits a phone screen without scrolling.")
+    # The experts already move our value through `ecr_pos_rank`; this shows the
+    # disagreement instead of only absorbing it, which is the "am I missing
+    # something?" read. Off by default -- four more columns is a lot on a phone.
+    _experts = _tg[1].toggle("Experts", value=False, key="expert_cols",
+                             help="Add JJ Zachariason, Justin Boone, Mike Clay and "
+                                  "WalterFootball's POSITIONAL ranks. They already "
+                                  "feed our consensus; this shows where they disagree "
+                                  "with it.")
     if _which == "market":
         _pool = (sorted([p for p in res["best_available"] if p.get("adp")],
                         key=lambda x: x["adp"])
@@ -887,6 +896,8 @@ if True:
             # 100th with 100% declining. The pair is the signal.
             "Arc": arc_flag(p.get("arc")),
             "Decl%": p.get("decl"),
+            **({"JJ": p.get("jj"), "Boone": p.get("boone"),
+                "Clay": p.get("clay"), "Walt": p.get("walt")} if _experts else {}),
         })
     if not rows:
         st.info(f"No {', '.join(_posf)} left on the board.")
@@ -898,7 +909,7 @@ if True:
     # na_rep works. Same root cause as `Bye`: a display path that is fine until
     # one row is missing.
     for _c in ("Bye", "Score", "VOR", "Surv%", "ADP", "vsADP", "CoW", "Decl%",
-               "BB", "Edge"):
+               "BB", "Edge", "JJ", "Boone", "Clay", "Walt"):
         if _c in df.columns:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
     if _compact:
@@ -908,7 +919,8 @@ if True:
         df = df[[c for c in _keep if c in df.columns]]
     _grad = "Edge" if (bb_mode and "Edge" in df.columns) else "Score"
     _fmt = {"Score": "{:.0f}", "VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}",
-            "Surv%": "{:.0f}", "Decl%": "{:.0f}", "vsADP": "{:+.0f}", "Bye": "{:.0f}"}
+            "Surv%": "{:.0f}", "Decl%": "{:.0f}", "vsADP": "{:+.0f}", "Bye": "{:.0f}",
+            "JJ": "{:.0f}", "Boone": "{:.0f}", "Clay": "{:.0f}", "Walt": "{:.0f}"}
     if bb_mode:
         _fmt.update({"BB": "{:.0f}", "Edge": "{:.0f}"})
     def _grad_ok(col):
@@ -933,7 +945,8 @@ if True:
     # Pin the name so it stays put while the numbers scroll. Without this a phone
     # user scrolls right to read Surv% and can no longer see WHOSE it is.
     _colcfg = {"Player": st.column_config.TextColumn("Player", pinned=True, width=150)}
-    for _c, _w in (("Pos", 58), ("Tm", 48), ("Bye", 44), ("Score", 62), ("VOR", 56),
+    for _c, _w in (("JJ", 48), ("Boone", 56), ("Clay", 50), ("Walt", 50),
+                   ("Pos", 58), ("Tm", 48), ("Bye", 44), ("Score", 62), ("VOR", 56),
                    ("Tier", 58), ("Surv%", 62), ("ADP", 56), ("vsADP", 62),
                    ("CoW", 54), ("Arc", 54), ("Decl%", 60), ("BB", 56), ("Edge", 58)):
         if _c in df.columns:
@@ -945,7 +958,7 @@ if True:
                         column_config=_colcfg,
                         selection_mode="single-row", on_select="rerun",
                         key=f"ba_{len(ss.drafted)}_{_which}_{int(_compact)}"
-                            f"_{'-'.join(sorted(_posf or []))}")
+                            f"_{'-'.join(sorted(_posf or []))}_{int(_experts)}")
     _rows = list(getattr(getattr(_sel, "selection", None), "rows", None) or [])
     if _rows and not done:
         do_pick(_pool[_rows[0]]["id"])
@@ -959,6 +972,11 @@ if True:
             "- **Surv%** — chance he lasts to your next pick (Monte-Carlo on ADP + the live run read).\n"
             "- **vsADP** — picks past his own ADP he has already fallen. `+20` = a bargain here; "
             "`−20` = taking him now is a reach.\n"
+            "- **JJ / Boone / Clay / Walt** — each expert's POSITIONAL rank "
+            "(JJ Zachariason, Justin Boone, Mike Clay, WalterFootball), shown with "
+            "the Experts toggle. All four already feed our consensus rank, so a "
+            "player they all have well above his `Pos` here is one our model is "
+            "alone on.\n"
             "- **CoW** — cost of waiting: value you lose at that position by passing this round.\n"
             "- **Arc** — where our projection sits in the distribution of what comparable players "
             "did NEXT (same position, career year, pedigree). `!` = we project above almost all of "

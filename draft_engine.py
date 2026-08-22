@@ -155,6 +155,44 @@ OPTION_GRID_N = 600     # quadrature nodes for E[min(X_p, X_r)] = int sf_p * sf_
 # The cliff at a position is only worth something to YOU in proportion to what
 # another body there is worth to your roster.
 SCARCITY_ROSTER_AWARE = True
+# ⭐ PER-PLAYER SCARCITY. `cow` is POSITIONAL -- bestnow[pos] - ebest[pos] -- so
+# every player at a position receives the position LEADER's cliff, flat, and each
+# player's own survival probability never enters the score at all (it is computed
+# and displayed, and that is all). The consequence is the pick this engine gets
+# wrong most visibly: at 5.10 of a 15-round mock it took Jadarian Price (VOR 77,
+# survival 99%) over Quinshon Judkins (VOR 53, survival 31%) with cow = 0 for
+# both. Correct on its own terms -- waiting costs nothing AT RB because Price
+# will still be there -- and wrong as a decision, because taking Judkins now and
+# Price next turn banks 53+77 while the reverse banks 77 + whatever is left.
+#
+# The premium a player deserves is P(he is gone) x (what you lose if he is):
+#     drop(p) = max(0, vor(p) - ebest[pos])        <- HIS dropoff, not the leader's
+#     scar(p) = W_SCARCITY * (1 - surv(p)) * drop(p) * rf
+# surv 0.99 -> ~no premium (wait); surv 0.31 -> 0.69 x his cliff (take him now).
+#
+# ⛔ OFF, and the first evidence is genuinely MIXED -- not merely unvalidated.
+# Swept over 3 seeded 15-round mocks it changes only 3 of 45 picks (7%), and of
+# those three:
+#   pick 111  OFF Jordyn Tyson (VOR -9.2) -> ON Mark Andrews (VOR 31.8)   RIGHT.
+#             The post-draft review independently flagged that exact pick as a
+#             +28 miss.
+#   pick  15  OFF Josh Jacobs (118.7, surv 50%) -> ON A.J. Brown (93.0, surv 0%)
+#             WRONG, and instructively so. Two-pick value of Jacobs-first is
+#             118.7 + ~85 = 204; Brown-first is 93 + (.50*118.7 + .50*85) = 195.
+#             Taking the man who is certainly gone is only right when he is worth
+#             KEEPING -- this term rewards low survival even on the lower-value
+#             player, which is a real failure mode, not noise.
+#   pick 159  both below replacement; meaningless.
+#
+# ⭐ So the user's intuition is right about the CASE (similar value, different
+# survival) and this additive form is the wrong instrument for it. The correct
+# statement is a two-pick lookahead --
+#     score(p) = vor(p) + E[ best available to me at my next pick | p taken now ]
+# -- which prices "what does losing him actually cost" instead of paying a bounty
+# on scarcity itself. That is a bigger change and needs draft_tune over BOTH
+# seasons before it goes anywhere near a live board. W_SCARCITY=2 looked
+# overwhelming on 2025 (+110, t +3.13) and reversed on 2024 (-66, t -1.74).
+SCARCITY_PER_PLAYER = False
 # ⭐ roster_factor is a MULTIPLIER, and from ~round 9 on every remaining player has
 # NEGATIVE VOR (all 100 of the players ranked 101-200 do). Multiplying a negative
 # by a small discount makes it LESS negative, so the penalty for a filled position
@@ -877,7 +915,11 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         if bb_val is not None:
             continue                                   # scored below, in two passes
         rf = roster_factor(cfg, pos, my_counts.get(pos, 0))
-        scar = W_SCARCITY * max(0.0, cow.get(pos, 0.0))
+        if SCARCITY_PER_PLAYER:
+            drop = max(0.0, p["_vor"] - ebest.get(pos, 0.0))
+            scar = W_SCARCITY * (1.0 - p["_surv"]) * drop
+        else:
+            scar = W_SCARCITY * max(0.0, cow.get(pos, 0.0))
         if SCARCITY_ROSTER_AWARE:
             scar *= rf
         eff = float(effective_vor(p["_vor"], rf, pos not in ("K", "DST")))
@@ -1263,8 +1305,15 @@ def _slim(p: dict, full: bool = False) -> dict:
            "bye": p.get("bye")}
     if full:
         out.update({"survival": p.get("_surv"), "cost_of_waiting": p.get("_cow"),
-                    "rec_score": p.get("_rec_score"), "ecr": p.get("ecr"), "clay": p.get("clay"),
+                    "rec_score": p.get("_rec_score"), "ecr": p.get("ecr"),
                     "need": p.get("_need"),
+                    # the four rank-only experts. They already move the value
+                    # backbone through ecr_pos_rank; carrying them here is what
+                    # lets the board SHOW the disagreement rather than just
+                    # absorb it. ⚠ _slim uses a FIXED key set -- a field missing
+                    # from this dict renders as an empty column, not an error.
+                    "clay": p.get("clay"), "jj": p.get("jj"),
+                    "boone": p.get("boone"), "walt": p.get("walt"),
                     # best-ball marginal value + the alternative it is scored
                     # against; both absent (None) in redraft
                     "bb": p.get("_bb"), "bb_repl": p.get("_bb_repl")})
