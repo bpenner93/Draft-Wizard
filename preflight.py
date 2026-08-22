@@ -633,6 +633,27 @@ def main():
     for lid in a.league:
         check_league(lid)
     if not a.quick:
+        # ⭐ the rendered-UI pass. Every 2026-08-21 defect was a DISPLAY bug that
+        # the engine checks and AppTest both passed -- a chip labelled "Jr. · WR",
+        # ADP printing "None", a constant column painted solid red. This walks a
+        # full mock and asserts on the strings the UI would actually show.
+        head("RENDERED UI (full mock, every pick)")
+        import subprocess
+        # ⚠ encoding="utf-8": the child writes utf-8, and text=True otherwise
+        # decodes with the locale codepage, mangling every · and — it relays
+        r = subprocess.run([sys.executable, str(HERE / "mock_render_check.py"),
+                            "--seeds", "1"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           cwd=str(HERE), env={**__import__("os").environ,
+                                               "PYTHONIOENCODING": "utf-8"})
+        out = (r.stdout or "") + (r.stderr or "")
+        for line in out.splitlines():
+            if line.strip().startswith(("✗", "✓ all", "seed ", "suffix", "tables cont",
+                                        "grids cont", "(no suffixed")):
+                print("  " + line.strip())
+        (ok if r.returncode == 0 else bad)(
+            "rendered-UI mock" + ("" if r.returncode == 0 else
+                                  f" FAILED — run `python mock_render_check.py`"))
         check_app(a.league[0] if a.league else None)
     if a.phone:
         check_phone()

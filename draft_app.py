@@ -677,7 +677,8 @@ with side:
         st.markdown('<div class="dw-h">🕐 On deck — who picks before you</div>',
                     unsafe_allow_html=True)
         st.markdown(on_deck_html(cfg, sstate, res["current_overall"], res["my_next_pick"],
-                                 res["opponents"].get("seat_need"), max_rows=13),
+                                 res["opponents"].get("seat_need"), max_rows=13,
+                                 complete=done),
                     unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------- quick mark

@@ -217,7 +217,8 @@ def draft_board_html(cfg, state, drafted, by_id, rounds_window: int | None = Non
 
 # --------------------------------------------------------------------------- on deck
 def on_deck_html(cfg, state, current_overall: int, my_next: int | None,
-                 seat_need: list[dict] | None, max_rows: int = 14) -> str:
+                 seat_need: list[dict] | None, max_rows: int = 14,
+                 complete: bool = False) -> str:
     """The queue between now and your next pick: every seat that picks before you,
     in order, with the position that seat most needs.
 
@@ -226,9 +227,16 @@ def on_deck_html(cfg, state, current_overall: int, my_next: int | None,
     own, so a team with back-to-back turns at the turn shows up twice."""
     need = {int(d["slot"]): d.get("top_need") for d in (seat_need or [])}
     total = int(cfg.teams) * int(cfg.total_rounds())
+    # ⚠ `complete` must be passed in, not inferred. analyze() CLAMPS
+    # current_overall to total_picks at the end, so the final pick looks
+    # identical to a live one and this panel rendered "15.12 ON THE CLOCK" on a
+    # finished draft. The app only avoided showing it by guarding the call --
+    # a panel that lies unless its caller remembers to hide it is a trap.
+    if complete or current_overall > total:
+        return f'<div style="color:{MUTE};font-size:12px;padding:8px">Draft complete.</div>'
     end = my_next if my_next else min(total, current_overall + max_rows - 1)
     if end < current_overall:
-        return (f'<div style="color:{MUTE};font-size:12px">Draft complete.</div>')
+        return f'<div style="color:{MUTE};font-size:12px;padding:8px">Draft complete.</div>'
 
     rows = ""
     n = 0
