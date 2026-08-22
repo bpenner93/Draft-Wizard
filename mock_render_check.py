@@ -149,7 +149,12 @@ def run(seed: int, cfg: E.LeagueConfig, board: list[dict]) -> dict:
         if "DST" in grid:
             seen["dst_cells"] += 1
 
-        drafted.append(res["recommendation"]["id"])
+        rec = res["recommendation"]
+        seen.setdefault("first_by_pos", {}).setdefault(
+            rec["pos"], B.pick_label(cfg, cur))
+        seen.setdefault("picks", []).append(
+            (B.pick_label(cfg, cur), rec["name"], rec["pos"]))
+        drafted.append(rec["id"])
         guard += 1
         drafted = E.mock_advance(valued, cfg, drafted, rng)
 
@@ -224,16 +229,41 @@ def check_names():
            f"(suffixes stripped, defenses kept whole)")
 
 
+def live_cfg(league_id: str) -> E.LeagueConfig:
+    """Build the config from the LIVE league, not from a constant.
+
+    ⭐ This is the whole lesson of 2026-08-21: a hardcoded 12T/15rd/1QB here would
+    keep passing after a commissioner edits the league, which is exactly how the
+    Superflex drift survived for two weeks. Rehearse against what the league says
+    TODAY."""
+    from sleeper_api import league_state
+    s = league_state(league_id=league_id)
+    rc = s["roster_cfg"]
+    print(f"  live: {(s['league_name'] or '').strip()} · {s['type']} · {s['teams']}T · "
+          f"{s['rounds']} rds · slot {s['my_slot']} · "
+          f"{'SUPERFLEX' if rc['superflex'] else '1QB'} {rc['scoring'].upper()} · "
+          f"{len(s['picks'])} picks made")
+    return E.LeagueConfig(
+        teams=int(s["teams"]), scoring=rc["scoring"], superflex=rc["superflex"],
+        my_slot=int(s["my_slot"] or 1), snake=bool(s["snake"]),
+        rounds=int(s["rounds"]), bench=int(rc["bench"]), starters=dict(rc["starters"]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--league", help="Sleeper league_id — read the settings LIVE "
+                                     "instead of using the built-in default")
     a = ap.parse_args()
 
     board = E.load_board()
-    cfg = E.LeagueConfig(
-        teams=12, scoring="ppr", superflex=False, my_slot=10, snake=True, rounds=15,
-        bench=6, starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 2,
-                           "SUPERFLEX": 0, "K": 0, "DST": 1})
+    if a.league:
+        cfg = live_cfg(a.league)
+    else:
+        cfg = E.LeagueConfig(
+            teams=12, scoring="ppr", superflex=False, my_slot=10, snake=True, rounds=15,
+            bench=6, starters={"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 2,
+                               "SUPERFLEX": 0, "K": 0, "DST": 1})
     print(f"=== FULL MOCKS, RENDERING THE UI AT EVERY PICK "
           f"({cfg.teams}T {cfg.scoring.upper()} slot {cfg.my_slot}, "
           f"{cfg.total_rounds()} rds) ===")
@@ -244,6 +274,13 @@ def main():
         print(f"  seed {s}: {r['chips']} chip labels · {r['tables']} rendered tables "
               f"· {r['grids']} grids · roster {r.get('shape','?')} "
               f"· grade {r.get('grade','?')}")
+        if r.get("first_by_pos"):
+            print(f"          first at each position: "
+                  + "  ".join(f"{k}@{v}" for k, v in r["first_by_pos"].items()))
+        if s == 1 and r.get("picks"):
+            print("          your board: "
+                  + " → ".join(f"{lab} {nm.split()[-1]}({pos})"
+                               for lab, nm, pos in r["picks"][:8]) + " …")
         for k, v in r.items():
             if isinstance(v, int):
                 tot[k] = tot.get(k, 0) + v
