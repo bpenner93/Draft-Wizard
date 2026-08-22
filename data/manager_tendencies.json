@@ -1,0 +1,341 @@
+{
+ "league_id": "1381162289226346496",
+ "league": "ReDrafters Rejoice",
+ "season_now": "2026",
+ "format_now": {
+  "superflex": false,
+  "scoring": "ppr",
+  "teams": 12
+ },
+ "history": [
+  {
+   "season": "2025",
+   "superflex": true
+  },
+  {
+   "season": "2024",
+   "superflex": true
+  },
+  {
+   "season": "2023",
+   "superflex": true
+  },
+  {
+   "season": "2022",
+   "superflex": true
+  }
+ ],
+ "seasons_used": [
+  "2022",
+  "2023",
+  "2024",
+  "2025"
+ ],
+ "format_changed_from": [
+  "2022",
+  "2023",
+  "2024",
+  "2025"
+ ],
+ "managers": [
+  {
+   "user_id": "461348909604663296",
+   "name": "Pittskriegbop",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "WR",
+   "opens_with_pct": 50,
+   "median_first_round": {
+    "WR": 2.5,
+    "RB": 2.0,
+    "TE": 7.0,
+    "DST": 15.5
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 4.8,
+    "WR": 6.2,
+    "TE": 1.5,
+    "K": 0,
+    "DST": 0.5
+   },
+   "notes": []
+  },
+  {
+   "user_id": "731291436275879936",
+   "name": "Never Wrong, Just Early",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "RB",
+   "opens_with_pct": 50,
+   "median_first_round": {
+    "RB": 2.5,
+    "WR": 2.0,
+    "TE": 7.0,
+    "DST": 15.5
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 5.2,
+    "WR": 5.8,
+    "TE": 1,
+    "K": 0,
+    "DST": 1
+   },
+   "notes": []
+  },
+  {
+   "user_id": "429676984948232192",
+   "name": "Life Alert Squad",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "WR",
+   "opens_with_pct": 100,
+   "median_first_round": {
+    "WR": 2.0,
+    "RB": 6.0,
+    "TE": 8.5,
+    "DST": 15
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 5.5,
+    "WR": 6.5,
+    "TE": 1,
+    "K": 0,
+    "DST": 0.2
+   },
+   "notes": [
+    "opens WR 100% of the time"
+   ]
+  },
+  {
+   "user_id": "460964992523431936",
+   "name": "The Mow Better Blues",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "WR",
+   "opens_with_pct": 50,
+   "median_first_round": {
+    "TE": 9.0,
+    "RB": 3.0,
+    "WR": 2.5,
+    "DST": 15
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 4.8,
+    "WR": 6,
+    "TE": 2,
+    "K": 0,
+    "DST": 0.2
+   },
+   "notes": [
+    "waits on TE (rd 9 vs room 7)"
+   ]
+  },
+  {
+   "user_id": "862452170270826496",
+   "name": "Sucks to suck",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "RB",
+   "opens_with_pct": 75,
+   "median_first_round": {
+    "RB": 1.5,
+    "TE": 6.5,
+    "WR": 3.5,
+    "DST": 15.0
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 4.8,
+    "WR": 5.5,
+    "TE": 2.2,
+    "K": 0,
+    "DST": 1
+   },
+   "notes": [
+    "opens RB 75% of the time"
+   ]
+  },
+  {
+   "user_id": "604118377006428160",
+   "name": "Fantasy Shmantasy",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "RB",
+   "opens_with_pct": 100,
+   "median_first_round": {
+    "RB": 2.0,
+    "WR": 4.5,
+    "TE": 5.5,
+    "DST": 14.5
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 4.8,
+    "WR": 6.2,
+    "TE": 1.5,
+    "K": 0,
+    "DST": 1
+   },
+   "notes": [
+    "opens RB 100% of the time"
+   ]
+  },
+  {
+   "user_id": "562914571956715520",
+   "name": "I Surrender",
+   "drafts": 4,
+   "seasons": [
+    "2022",
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "WR",
+   "opens_with_pct": 50,
+   "median_first_round": {
+    "WR": 2.5,
+    "RB": 3.0,
+    "TE": 5.0,
+    "DST": 15.0
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 5,
+    "WR": 6,
+    "TE": 1.2,
+    "K": 0,
+    "DST": 1
+   },
+   "notes": [
+    "takes TE early (rd 5 vs room 7)"
+   ]
+  },
+  {
+   "user_id": "430840397841838080",
+   "name": "PennerBoy",
+   "drafts": 3,
+   "seasons": [
+    "2023",
+    "2024",
+    "2025"
+   ],
+   "opens_with": "WR",
+   "opens_with_pct": 67,
+   "median_first_round": {
+    "WR": 1,
+    "RB": 2,
+    "TE": 13,
+    "DST": 16.0
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 6,
+    "WR": 5,
+    "TE": 1.7,
+    "K": 0,
+    "DST": 0.7
+   },
+   "notes": [
+    "opens WR 67% of the time",
+    "waits on TE (rd 13 vs room 7)"
+   ]
+  },
+  {
+   "user_id": "563167882623594496",
+   "name": "McPoopies",
+   "drafts": 2,
+   "seasons": [
+    "2024",
+    "2025"
+   ],
+   "opens_with": "WR",
+   "opens_with_pct": 100,
+   "median_first_round": {
+    "WR": 1.5,
+    "RB": 2.5,
+    "TE": 9.5,
+    "DST": 14.5
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 4.5,
+    "WR": 5,
+    "TE": 2.5,
+    "K": 0,
+    "DST": 1
+   },
+   "notes": [
+    "opens WR 100% of the time",
+    "waits on TE (rd 9.5 vs room 7)"
+   ]
+  },
+  {
+   "user_id": "999871103235371008",
+   "name": "Strange Magic",
+   "drafts": 1,
+   "seasons": [
+    "2025"
+   ],
+   "opens_with": "TE",
+   "opens_with_pct": 100,
+   "median_first_round": {
+    "TE": 2,
+    "RB": 3,
+    "WR": 5,
+    "DST": 15
+   },
+   "avg_counts": {
+    "QB": 0,
+    "RB": 5,
+    "WR": 6,
+    "TE": 2,
+    "K": 0,
+    "DST": 1
+   },
+   "notes": [
+    "opens TE 100% of the time",
+    "takes TE early (rd 2 vs room 7)"
+   ]
+  }
+ ],
+ "league_median_first_round": {
+  "WR": 2.5,
+  "RB": 2.5,
+  "TE": 7.0,
+  "DST": 15.0
+ }
+}
