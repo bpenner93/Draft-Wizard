@@ -125,6 +125,23 @@ W_NEED     = 1.0    # weight on roster-need bonus
 #            the functional and nothing else. The evaluated quantity is an exact
 #            1-D quadrature (no MC noise), so the value is deterministic and cheap
 #            enough for the ~30 compute_values calls a live draft makes.
+#
+# ⛔ TESTED 2026-08-21, DOES NOT SHIP -- option_value_duel.py, 48 paired leagues/
+# season, seats swapped, real weekly PPR, scored TWO ways (perfect-foresight
+# lineup = the gate on record; ex-ante lineup by preseason projection):
+#       foresight   2025 +137.9 t +2.87      2024  -17.8 t -0.47     sign FLIPS
+#       ex-ante     2025 +115.1 t +3.00      2024  -52.0 t -1.25     sign FLIPS
+# By lineup slot (A-B, both seasons): QB +66/+51 CONSISTENT (a better QB1), TE
+# -76/-62 CONSISTENT (drops the TE2 AND downgrades TE1 -- Kelce over Bowers,
+# Pitts over Andrews: a flat TE CV of .651 compresses the elite-to-replacement
+# gap where TE mean-VOR lives), RB +126/-7 = THE SEASON BET. The durable effects
+# net to ~-10; the sign of the result is one positional wager that reversed
+# OOS. Same signature as the W_SCARCITY=2 reversal. With a FLAT CV the
+# functional is monotone within a position (RB spearman .9999 vs mean), so it
+# never re-ordered depth the way the pitch assumed -- it only rescaled VOR
+# against the additive knobs and re-weighted across positions.
+# The QB lift is a LEAD, not a finding: it was not pre-registered, and the
+# harness's pseudo-ADP market may under-draft QBs relative to real rooms.
 VALUE_MODEL = "mean"
 OPTION_GRID_N = 600     # quadrature nodes for E[min(X_p, X_r)] = int sf_p * sf_r dt
 # Damp cost-of-waiting by the SAME roster_factor that damps VOR.

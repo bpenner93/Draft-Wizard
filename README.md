@@ -85,3 +85,20 @@ casual GPPs, soft double-ups) lives in the pipeline: `soft_contest_finder.py`.
 The recommendation knobs live at the top of `draft_engine.py`:
 `W_SCARCITY`, `W_NEED`, `KDST_LATE_ROUNDS`, the tier-gap threshold, and
 `need_scores`. These are what we iterate to "tune in" the pick analyzer.
+
+## Live app
+
+**https://bpenner93-draft-wizard-draft-app-kk8kf8.streamlit.app/**
+
+Streamlit Community Cloud, deployed from `bpenner93/Draft-Wizard` `main` →
+`draft_app.py`. It redeploys automatically on push. Manage it at
+https://share.streamlit.io/.
+
+⚠ Do not try to find this URL by probing: every `*.streamlit.app` subdomain
+returns the same 303 to an auth page whether or not the app exists.
+
+Before a real draft, run the pre-flight (see `DRAFTDAY.md`):
+
+```
+python preflight.py --league <sleeper_league_id> --phone
+```
