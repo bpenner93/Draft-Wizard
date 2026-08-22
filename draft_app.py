@@ -2,12 +2,18 @@
 draft_app.py  --  Draft Wizard (Streamlit)
 ===========================================
 Phone-friendly live draft assistant. Mark players off as they're drafted (tap a
-chip, search, or auto-sync from Sleeper) and it recomputes the best pick, tiers,
-survival odds, and how your opponents are drafting after every pick.
+row, tap a chip, search, or auto-sync from Sleeper) and it recomputes the best
+pick, tiers, survival odds, and how your opponents are drafting after every pick.
 
 Local:   streamlit run draft_wizard/draft_app.py
 Phone:   deploy this folder to Streamlit Community Cloud (see README) -> open the
          https URL on your phone.
+
+LAYOUT -- this is a draft-room screen, not a dashboard. Everything you act on
+while a pick clock is running lives above the fold and needs no clicks:
+    status bar -> recommendation -> best available + who's on deck
+Everything you consult BETWEEN picks (full board, team shapes, forward plan,
+practice controls) is in the tab strip below it.
 """
 from __future__ import annotations
 
@@ -23,7 +29,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from draft_engine import (load_board, LeagueConfig, analyze, plan_draft,   # noqa: E402
                           ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance,
                           team_on_clock, grade_draft)
-from draft_board import draft_board_html   # noqa: E402
+from draft_board import (draft_board_html, on_deck_html, run_strip_html,     # noqa: E402
+                         roster_matrix_html, status_bar_html, slot_team,
+                         pick_label, POS_BG)
 from draft_names import norm_name, pos_norm                          # noqa: E402
 
 # quick-league presets (the main axes; roster stays standard, your slot is separate)
@@ -68,6 +76,24 @@ ALL_PRESETS = _load_league_presets()
 
 st.set_page_config(page_title="Draft Wizard", page_icon="🏈", layout="wide",
                    initial_sidebar_state="expanded")
+
+# Tighten Streamlit's default spacing -- a draft screen wants density, and the
+# stock 6rem top padding pushes the recommendation below the fold on a phone.
+st.markdown("""
+<style>
+  .block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1500px;}
+  div[data-testid="stMetricValue"] {font-size: 1.35rem;}
+  div[data-testid="stVerticalBlockBorderWrapper"] {border-radius: 10px;}
+  .stTabs [data-baseweb="tab"] {padding: 6px 14px;}
+  .dw-rec {border:1px solid #334155;border-left:5px solid #f59e0b;border-radius:10px;
+           background:#0f172a;padding:12px 14px;margin-bottom:6px;}
+  .dw-rec h3 {margin:0 0 4px 0;font-size:1.25rem;color:#f1f5f9;}
+  .dw-pill {display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
+            font-weight:700;color:#fff;margin-right:5px;}
+  .dw-sub {color:#94a3b8;font-size:12px;margin-top:6px;}
+  .dw-h {color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.07em;
+         font-weight:700;margin:10px 0 4px 0;}
+</style>""", unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner=False)
@@ -154,12 +180,15 @@ SLEEPER_USER_ID = "430840397841838080"   # PennerBoy -- auto-detect your draft s
 
 
 def sleeper_sync(draft_id: str = None, league_id: str = None):
-    """Pull picks + config (type->snake, your slot) + board metadata (team names,
-    traded picks) from Sleeper. Accepts a draft_id OR a league_id."""
+    """Pull picks + config (type->snake, your slot, the LIVE starting lineup) +
+    board metadata (team names, traded picks) from Sleeper. Accepts a draft_id OR
+    a league_id."""
     from sleeper_api import league_state
     stt = league_state(league_id=league_id, draft_id=(draft_id or "").strip() or None)
     ci = {"type": stt["type"], "snake": stt["snake"], "teams": stt["teams"],
-          "rounds": stt["rounds"], "my_slot": stt["my_slot"]}
+          "rounds": stt["rounds"], "my_slot": stt["my_slot"],
+          "roster_cfg": stt.get("roster_cfg") or {}, "status": stt.get("status"),
+          "league_name": stt.get("league_name"), "pick_timer": stt.get("pick_timer")}
     drafted, matched, missed = [], [], []
     for pk in stt["picks"]:
         m = pk.get("metadata") or {}
@@ -177,6 +206,22 @@ def sleeper_sync(draft_id: str = None, league_id: str = None):
     ss["sleeper_cfg"] = ci
     ss["sleeper_state"] = stt
     return len(matched), missed, ci
+
+
+def sleeper_pick_count(league_id=None, draft_id=None) -> int | None:
+    """Just the pick COUNT -- one small GET, for the auto-sync poller. Deliberately
+    separate from sleeper_sync: polling the full league_state every few seconds
+    would be 5 requests a tick, and the only question is 'did anything change'."""
+    import requests
+    try:
+        if not draft_id:
+            from sleeper_api import resolve_draft_id
+            draft_id = resolve_draft_id(league_id)
+        r = requests.get(f"https://api.sleeper.app/v1/draft/{draft_id}/picks", timeout=8)
+        r.raise_for_status()
+        return len(r.json() or [])
+    except Exception:
+        return None          # a blip must never break the draft screen
 
 
 def total_picks():
@@ -207,7 +252,8 @@ def team_roster(slot):
     return out
 
 
-# draft_board_html lives in draft_board.py (imported at top) -- pure + headless-testable
+def seat_name(slot):
+    return slot_team(cfg, ss.get("sleeper_state"), slot)
 
 
 # --------------------------------------------------------------------------- sidebar: league
@@ -286,19 +332,48 @@ with st.sidebar:
         elif P.get("kind") == "redraft" and rookie_mode:
             st.info("Redraft league — set **Draft type → Redraft** at the top.")
 
-    # Sleeper live-sync auto-config wins (authoritative draft type + your slot)
+    # ⭐ THE LIVE LEAGUE IS AUTHORITATIVE, NOT THE PRESET.
+    # A preset is a snapshot taken whenever import_leagues.py last ran; commissioners
+    # edit leagues. ReDrafters Rejoice was imported 2026-08-06 as 12T **Superflex**
+    # / 16 rounds and by 2026-08-21 had no SUPER_FLEX slot and 15 rounds. Superflex
+    # moves QB replacement from ~QB12 to ~QB24, so under the stale preset Josh Allen
+    # read VOR 149 / board slot 6 instead of VOR 38 / slot 47 -- a round-1 QB
+    # recommendation in a single-QB league, with nothing anywhere reporting an error.
+    # So once you sync, everything the league object knows overrides the widgets.
     _sc = ss.get("sleeper_cfg")
+    _drift = []
     if _sc:
+        if _sc.get("snake") is not None and bool(_sc["snake"]) != cfg.snake:
+            _drift.append(f"draft type → {'snake' if _sc['snake'] else 'linear'}")
         if _sc.get("snake") is not None:
             cfg.snake = bool(_sc["snake"])
         if _sc.get("my_slot"):
             cfg.my_slot = int(_sc["my_slot"])
         if _sc.get("teams"):
             cfg.teams = int(_sc["teams"])
-        if rookie_mode and _sc.get("rounds"):
+        _rc = _sc.get("roster_cfg") or {}
+        if _rc.get("starters") and not bb_mode:
+            if _rc["starters"] != cfg.starters:
+                _drift.append("starting lineup")
+            cfg.starters = dict(_rc["starters"])
+            if bool(_rc.get("superflex")) != bool(cfg.superflex):
+                _drift.append(f"superflex → {'ON' if _rc.get('superflex') else 'OFF'}")
+            cfg.superflex = bool(_rc.get("superflex"))
+            if _rc.get("bench") is not None:
+                cfg.bench = int(_rc["bench"])
+            if _rc.get("scoring") and _rc["scoring"] != cfg.scoring:
+                _drift.append(f"scoring → {_rc['scoring']}")
+                cfg.scoring = _rc["scoring"]
+        # the DRAFT's own round count is authoritative in every mode -- the league's
+        # settings.draft_rounds is frequently absent or stale (here: 3, for 15 rounds)
+        if _sc.get("rounds") and not bb_mode:
+            if int(_sc["rounds"]) != int(cfg.total_rounds()):
+                _drift.append(f"rounds → {int(_sc['rounds'])}")
             cfg.rounds = int(_sc["rounds"])
-        st.caption(f"📲 Sleeper: {_sc.get('type', '?')} · your slot {cfg.my_slot}"
-                   + (f" · {cfg.rounds} rds" if rookie_mode and cfg.rounds else ""))
+        ss["cfg_drift"] = _drift
+        st.caption(f"📲 **{_sc.get('league_name') or 'Sleeper'}** · {_sc.get('type', '?')} · "
+                   f"slot {cfg.my_slot} · {cfg.total_rounds()} rds · "
+                   + ("SUPERFLEX" if cfg.superflex else "1QB"))
 
     st.divider()
     st.subheader("🔄 Sleeper live-sync")
@@ -316,6 +391,17 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Load failed: {e}")
+    if ss.get("sleeper_cfg"):
+        if st.button("🔁 Refresh picks", width="stretch",
+                     help="Re-pull the picks made since you last synced."):
+            try:
+                _lid = (ss.get("sleeper_state") or {}).get("league_id")
+                _did = (ss.get("sleeper_state") or {}).get("draft_id")
+                n, missed, ci = sleeper_sync(league_id=_lid, draft_id=None if _lid else _did)
+                st.success(f"{n} picks")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Refresh failed: {e}")
     with st.expander("…or paste a Draft ID"):
         did = st.text_input("Draft ID", help="sleeper.com/draft/nfl/<DRAFT_ID>")
         if st.button("Pull picks", width="stretch") and did:
@@ -332,6 +418,7 @@ with st.sidebar:
         undo(); st.rerun()
     if st.button("🗑 Reset draft", width="stretch"):
         ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None)
+        ss.pop("cfg_drift", None)
         ss["last_my_pick"] = 0; ss["started"] = False; st.rerun()
 
 
@@ -344,12 +431,12 @@ ss.setdefault("started", False)
 if not ss["started"]:
     st.title("🏈 Draft Wizard")
     _sf = " Superflex" if cfg.superflex else ""
-    _summ = f"**{mode}** · {cfg.teams}-team {cfg.scoring.upper()}{_sf} · your slot **{cfg.my_slot}**"
-    if rookie_mode:
-        _summ += f" · {cfg.total_rounds()} rounds"
+    _summ = f"**{mode}** · {cfg.teams}-team {cfg.scoring.upper()}{_sf} · your slot **{cfg.my_slot}** · {cfg.total_rounds()} rounds"
     if ss.get("practice"):
         _summ += " · 🎮 practice (AI drafts the other teams)"
     st.info(_summ)
+    st.caption(f"Board: **{len(working)}** players · "
+               f"**{sum(1 for p in working if p.get('adp'))}** with live ADP")
     if st.button("▶ Start draft", type="primary", width="stretch"):
         ss.drafted = []
         ss.pop("plan", None)
@@ -359,76 +446,117 @@ if not ss["started"]:
         ss["started"] = True
         st.rerun()
     st.caption("Set your league, strategy, slot, and Redraft/Rookie + Practice in the sidebar "
-               "(☰ top-left), then hit Start.")
+               "(☰ top-left), then hit Start. **For a real Sleeper draft, use "
+               "“Load this league's draft” instead** — it reads your slot, the draft "
+               "type, the true round count and the live starting lineup from Sleeper.")
     st.stop()
 
 # --------------------------------------------------------------------------- analyze
 res = analyze(working, cfg, ss.drafted)
 on_clock_me = res["on_clock"] == cfg.my_slot
-
-# --------------------------------------------------------------------------- header
 done = res["complete"]
-h1, h2, h3 = st.columns([2, 2, 3])
-h1.metric("Pick", f"{res['current_overall']}  (Rd {res['round']})")
-h2.metric("On the clock",
-          "— done —" if done else (f"Team {res['on_clock']}" + ("  ← YOU" if on_clock_me else "")))
-h3.metric("Your next pick", f"{res['my_next_pick']}  ({res['picks_until_mine']} away)"
-          if res["my_next_pick"] else "—")
-st.progress(min(1.0, len(ss.drafted) / max(1, res["total_picks"])),
-            text=f"{len(ss.drafted)} of {res['total_picks']} picks made")
-if on_clock_me:
-    st.success("🟢 **You're on the clock**")
+sstate = ss.get("sleeper_state")
 
-# --------------------------------------------------------------------------- draft controls (always visible)
-uc = st.columns([1, 1, 4])
+# --------------------------------------------------------------------------- status bar
+st.markdown(status_bar_html(cfg, sstate, res, seat_name(res["on_clock"])),
+            unsafe_allow_html=True)
+
+# --------------------------------------------------------------------------- auto-sync
+# A 15-round 12-team draft is 180 picks. Tapping Sync after each one is not a
+# workflow, so poll Sleeper on a timer and rerun ONLY when the pick count actually
+# moves. Failure here must be invisible: a dropped request returns None and the
+# board simply stays on the last good state.
+if sstate and not done:
+    _as = st.session_state.get("auto_sync", False)
+    if _as:
+        @st.fragment(run_every="12s")
+        def _poll():
+            n = sleeper_pick_count(league_id=sstate.get("league_id"),
+                                   draft_id=sstate.get("draft_id"))
+            if n is None:
+                st.caption("🔌 Sleeper didn't answer — retrying; the board below is "
+                           "the last good state.")
+                return
+            if n != len(ss.drafted):
+                try:
+                    sleeper_sync(league_id=sstate.get("league_id"))
+                except Exception:
+                    return
+                st.rerun(scope="app")
+            st.caption(f"🔄 auto-syncing every 12s · {n} picks in")
+        _poll()
+
+if ss.get("cfg_drift"):
+    st.warning("⚠︎ Your saved preset disagreed with the live league — Sleeper wins: **"
+               + "**, **".join(ss["cfg_drift"]) + "**. "
+               "Re-run `import_leagues.py` to update the preset.")
+
+# --------------------------------------------------------------------------- draft controls
+uc = st.columns([1, 1, 1, 1.4])
 if uc[0].button("↩︎ Undo", width="stretch"):
     undo(); st.rerun()
-if uc[1].button("🗑 Reset draft", width="stretch"):
-    ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None); ss.pop("sleeper_state", None); ss["started"] = False; st.rerun()
+if uc[1].button("🗑 Reset", width="stretch"):
+    ss.drafted = []; ss.pop("plan", None); ss.pop("sleeper_cfg", None)
+    ss.pop("sleeper_state", None); ss.pop("cfg_drift", None); ss["started"] = False; st.rerun()
+if sstate:
+    if uc[2].button("🔁 Sync", width="stretch", type="primary",
+                    help="Pull the latest picks from Sleeper now"):
+        try:
+            sleeper_sync(league_id=sstate.get("league_id"))
+            st.rerun()
+        except Exception as e:
+            st.error(f"Sync failed: {e}")
+    uc[3].toggle("🔄 Auto-sync", key="auto_sync", value=False,
+                 help="Poll Sleeper every 12s and pull picks automatically. "
+                      "Turn it on when the draft starts.")
+st.progress(min(1.0, len(ss.drafted) / max(1, res["total_picks"])),
+            text=f"{len(ss.drafted)} of {res['total_picks']} picks made · "
+                 f"round {res['round']} of {cfg.total_rounds()}")
 
 # --------------------------------------------------------------------------- practice controls
 if st.session_state.get("practice"):
-    pc = st.container(border=True)
-    pc.write(f"🎮 **Practice mode** — AI drafts the other {cfg.teams - 1} teams off ADP; you pick your own.")
-    pcc = pc.columns(4)
-    if pcc[0].button("▶ Sim to my pick", width="stretch", disabled=done):
-        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
-        st.rerun()
-    if pcc[1].button("⏱ One pick", width="stretch", disabled=done or on_clock_me,
-                     help="Advance the room a single pick so you can watch it develop. "
-                          "Needs auto-advance off, otherwise the room is already at your turn."):
-        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted,
-                                  np.random.default_rng(), max_picks=1)
-        st.rerun()
-    if pcc[2].button("🔄 New mock", width="stretch"):
-        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
-        ss.pop("plan", None); ss["last_my_pick"] = 0
-        st.rerun()
-    _auto = pcc[3].button("⏭ Auto-draft rest", width="stretch", disabled=done,
-                          help="AI finishes the whole draft, picking your team by your Strategy")
-    # a fixed slot inside the practice panel, written to from the loop below --
-    # auto-drafting a full board runs a Monte-Carlo per remaining round, which is
-    # several seconds of silence otherwise
-    pc.checkbox("Auto-advance to my next pick", key="auto_adv", value=True,
-                help="Off = the room stays where it is after you pick, so you can step "
-                     "through the other teams one pick at a time.")
-    prog = pc.empty()
-    if _auto:
-        valued = prep_valued(working, cfg); rng = np.random.default_rng()
-        total = total_picks(); guard = 0
-        while len(ss.drafted) < total and guard < total + 5:
-            ss.drafted = mock_advance(valued, cfg, ss.drafted, rng)
-            if len(ss.drafted) >= total:
-                break
-            # a cheaper sim than the on-screen default: this runs once per remaining
-            # round, and the pick only needs the ranking, not 4-digit survival odds
-            _r = analyze(working, cfg, ss.drafted, n_sims=300).get("recommendation")
-            if not _r:
-                break
-            ss.drafted.append(_r["id"]); guard += 1
-            prog.progress(min(1.0, len(ss.drafted) / total),
-                          text=f"Auto-drafting… {len(ss.drafted)}/{total}")
-        st.rerun()
+    with st.expander("🎮 Practice controls", expanded=not done):
+        pc = st.container()
+        pc.caption(f"AI drafts the other {cfg.teams - 1} teams off ADP; you pick your own.")
+        pcc = pc.columns(4)
+        if pcc[0].button("▶ Sim to my pick", width="stretch", disabled=done):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
+            st.rerun()
+        if pcc[1].button("⏱ One pick", width="stretch", disabled=done or on_clock_me,
+                         help="Advance the room a single pick so you can watch it develop. "
+                              "Needs auto-advance off, otherwise the room is already at your turn."):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted,
+                                      np.random.default_rng(), max_picks=1)
+            st.rerun()
+        if pcc[2].button("🔄 New mock", width="stretch"):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+            ss.pop("plan", None); ss["last_my_pick"] = 0
+            st.rerun()
+        _auto = pcc[3].button("⏭ Auto-draft rest", width="stretch", disabled=done,
+                              help="AI finishes the whole draft, picking your team by your Strategy")
+        pc.checkbox("Auto-advance to my next pick", key="auto_adv", value=True,
+                    help="Off = the room stays where it is after you pick, so you can step "
+                         "through the other teams one pick at a time.")
+        # a fixed slot inside the practice panel, written to from the loop below --
+        # auto-drafting a full board runs a Monte-Carlo per remaining round, which is
+        # several seconds of silence otherwise
+        prog = pc.empty()
+        if _auto:
+            valued = prep_valued(working, cfg); rng = np.random.default_rng()
+            total = total_picks(); guard = 0
+            while len(ss.drafted) < total and guard < total + 5:
+                ss.drafted = mock_advance(valued, cfg, ss.drafted, rng)
+                if len(ss.drafted) >= total:
+                    break
+                # a cheaper sim than the on-screen default: this runs once per remaining
+                # round, and the pick only needs the ranking, not 4-digit survival odds
+                _r = analyze(working, cfg, ss.drafted, n_sims=300).get("recommendation")
+                if not _r:
+                    break
+                ss.drafted.append(_r["id"]); guard += 1
+                prog.progress(min(1.0, len(ss.drafted) / total),
+                              text=f"Auto-drafting… {len(ss.drafted)}/{total}")
+            st.rerun()
 
 # --------------------------------------------------------------------------- draft complete
 if done:
@@ -451,94 +579,108 @@ if done:
             ss.pop("plan", None); ss["last_my_pick"] = 0
             st.rerun()
 
-# --------------------------------------------------------------------------- recommendation
+# --------------------------------------------------------------------------- THE PICK
 rec = res["recommendation"]
-if rec:
-    surv = rec["survival"] * 100
-    box = st.container(border=True)
-    box.markdown(
-        f"### ⭐ {rec['name']}  —  {rec['pos']}{rec['posrank']} · {rec['team']}\n"
-        f"**VOR {rec['vor']}**  ·  Tier {rec['pos']}T{rec['tier']} ({rec['tier_left']} left in tier)  ·  "
-        f"survives to your pick **{surv:.0f}%**\n\n"
-        f"➡︎ _{rec['reason']}_")
-    if on_clock_me:
-        b1, b2 = box.columns([1, 3])
-        if b1.button(f"✅ Draft {rec['name'].split()[-1]}", width="stretch", type="primary"):
-            do_pick(rec["id"]); st.rerun()
-    else:
-        box.caption(f"🎯 Your target for pick {res['my_next_pick']}. "
-                    f"⏳ Team {res['on_clock']} is on the clock — tap who they take below.")
+main, side = st.columns([3, 2], gap="medium")
 
-    # marking / quick-pick row. A tap always books the pick for whoever is ON THE
-    # CLOCK, so say whose it is -- with auto-advance off, practice mode can sit on
-    # another team's turn and "quick-pick for your team" would be a lie.
-    if on_clock_me:
-        _cap = "Your pick — tap your player, or use Draft above:"
-    else:
-        _cap = f"Tap who Team {res['on_clock']} just drafted:"
-    st.caption(_cap)
-    chips = st.columns(5)
-    for i, a in enumerate(res["best_available"][:5]):
-        if chips[i].button(f"{a['name'].split()[-1]} {a['pos']}", key=f"chip_{i}", width="stretch"):
-            do_pick(a["id"]); st.rerun()
+with main:
+    if on_clock_me and not done:
+        st.success("🟢 **You're on the clock**")
+    if rec:
+        surv = rec["survival"] * 100
+        _c = POS_BG.get(rec["pos"], "#475569")
+        st.markdown(
+            f'<div class="dw-rec">'
+            f'<h3>⭐ {rec["name"]} '
+            f'<span class="dw-pill" style="background:{_c}">{rec["pos"]}{rec["posrank"]}</span>'
+            f'<span style="color:#94a3b8;font-size:13px;font-weight:400">{rec["team"] or ""}</span></h3>'
+            f'<div style="color:#e2e8f0;font-size:13px">'
+            f'<b>VOR {rec["vor"]:.0f}</b> &nbsp;·&nbsp; Tier {rec["pos"]}T{rec["tier"]} '
+            f'({rec["tier_left"]} left in tier) &nbsp;·&nbsp; '
+            f'survives to your pick <b>{surv:.0f}%</b></div>'
+            f'<div class="dw-sub">➡︎ <i>{rec["reason"]}</i></div></div>',
+            unsafe_allow_html=True)
+        if on_clock_me:
+            if st.button(f"✅ Draft {rec['name']}", width="stretch", type="primary"):
+                do_pick(rec["id"]); st.rerun()
+        else:
+            st.caption(f"🎯 Your target for pick {pick_label(cfg, res['my_next_pick'])} "
+                       f"(#{res['my_next_pick']}). ⏳ **{seat_name(res['on_clock'])}** is on the "
+                       f"clock — tap who they take below.")
 
-# --------------------------------------------------------------------------- draft board
-with st.expander("🗺️ Draft Board — all teams, picks & trades"):
-    st.markdown(draft_board_html(cfg, ss.get("sleeper_state"), ss.drafted, by_id),
+        # Quick-pick chips. A tap always books the pick for whoever is ON THE CLOCK,
+        # and the two cases want DIFFERENT shortlists:
+        #   on the clock  -> your best options, i.e. the decision order
+        #   off the clock -> who the room is most likely to take next, i.e. ADP
+        # (the old code used raw VOR for both, which offered a kicker in round 7)
+        if on_clock_me:
+            shortlist, chip_note = res["ranked"][:5], "your pick"
+        else:
+            shortlist = sorted([p for p in res["best_available"] if p.get("adp")],
+                               key=lambda x: x["adp"])[:5]
+            chip_note = f"who {seat_name(res['on_clock'])} took — likeliest by ADP"
+        st.markdown(f'<div class="dw-h">Quick mark — {chip_note}</div>',
+                    unsafe_allow_html=True)
+        chips = st.columns(5)
+        for i, a in enumerate(shortlist):
+            if chips[i].button(f"{a['name'].split()[-1]} · {a['pos']}", key=f"chip_{i}",
+                               width="stretch"):
+                do_pick(a["id"]); st.rerun()
+
+with side:
+    st.markdown('<div class="dw-h">🕐 On deck — who picks before you</div>',
                 unsafe_allow_html=True)
-    st.caption("Colored = drafted (by position) · ★ column = you · orange outline = on the clock"
-               + (" · ⇄ = traded pick (now the tagged team's)" if ss.get("sleeper_state") else ""))
-
-# manual mark-off (search anyone)
-if not done:
-    undrafted = [p for p in working if p["id"] not in set(ss.drafted)]
-    label = {f"{p['name']} · {p['pos']}-{p.get('team','')}": p["id"] for p in undrafted}
-    _prompt = ("Or search a player to draft:" if (st.session_state.get("practice") or on_clock_me)
-               else "Or search a player who was just drafted:")
-    pick_label = st.selectbox(_prompt, [""] + list(label.keys()))
-    if st.button("Mark drafted") and pick_label:
-        do_pick(label[pick_label]); st.rerun()
-
-with st.expander("📋 Draft plan — simulate the rest of your draft"):
-    st.caption("Monte-Carlo your remaining picks (opponents pick by ADP, you by your Strategy) "
-               "to see your likely build path and where each position's value dries up.")
-    if bb_mode:
-        # plan_draft picks its simulated future selves with effective_vor /
-        # roster_factor / need -- the redraft value model. In best ball the
-        # actual recommendation comes from bestball.py instead, so the plan
-        # would confidently describe a build the wizard will not make. A plan
-        # that contradicts the pick is worse than no plan, so it is disabled
-        # rather than shown with a caveat. (Porting it means routing its
-        # my-pick policy through _bb_values, the same one-helper rule that
-        # ROSTER_INTERP needed.)
-        st.info("Not available in Best Ball mode — the forward planner still "
-                "uses the redraft value model, so it would contradict the "
-                "recommendation. Tracked as a follow-up.")
-    elif st.button("Run / refresh plan", key="planbtn"):
-        ss["plan"] = plan_draft(working, cfg, ss.drafted, n_sims=150)
-    plan = ss.get("plan")
-    if plan and plan.get("picks"):
-        if plan.get("note"):
-            st.write("**" + plan["note"] + "**")
-        prows = [{
-            "Pick": p["pick_no"], "Rd": p["round"], "Target": p["top_pos"],
-            "Conf": f"{int(max(p['pos_probs'].values())*100)}%" if p["pos_probs"] else "",
-            "ExpVOR": p["exp_vor"],
-            "Often there": ", ".join(e.split()[-1] for e in p["examples"]),
-        } for p in plan["picks"][:12]]
-        st.dataframe(pd.DataFrame(prows), hide_index=True, width="stretch")
+    st.markdown(on_deck_html(cfg, sstate, res["current_overall"], res["my_next_pick"],
+                             res["opponents"].get("seat_need"), max_rows=13),
+                unsafe_allow_html=True)
 
 st.divider()
 
-# --------------------------------------------------------------------------- main columns
-left, right = st.columns([3, 2])
-
-with left:
-    st.subheader("Best available")
+# --------------------------------------------------------------------------- best available
+# Full width on purpose. This table is the product -- 12 columns inside a 3:2
+# column split gives each one ~50px, which turns the numbers you draft off into a
+# horizontal scroll. The rails below it are things you glance at, not read.
+if True:
+    bh = st.columns([2, 3])
+    bh[0].subheader("Best available")
+    # ⭐ THE ORDERING IS A CHOICE AND IT HAS TO BE VISIBLE.
+    # `ranked` = the wizard's own decision order (effective VOR + scarcity + need,
+    # roster-aware). `best_available` = raw positional VOR, roster-blind. They can
+    # disagree completely: at pick 73 of a 15-round league Brandon Aubrey is VOR
+    # 39.4 (2nd on the raw board) and _rec_score -28.0 (below every startable
+    # player). Showing the raw order as "best available" put a kicker second on
+    # the screen you draft from. Default to the order the pick is actually made on.
+    _ORDERS = {"⭐ For me": "ranked", "Raw value": "best_available", "Market ADP": "market"}
+    _pick_order = bh[1].radio("Rank by", list(_ORDERS), horizontal=True,
+                              label_visibility="collapsed", key="rank_by",
+                              help="For me = the wizard's own ranking (your roster, tier "
+                                   "cliffs and position runs priced in). Raw value = best "
+                                   "player left, ignoring your roster. Market ADP = the "
+                                   "order the room is likely to take them.")
+    _which = _ORDERS[_pick_order]
+    # On a phone the table is ~343px wide. 13 columns there is a horizontal scroll
+    # with the player's NAME scrolled off, which makes the numbers unreadable --
+    # so Player is pinned (below) and this drops to the six columns you actually
+    # draft off. Not auto-detected: Streamlit renders server-side and has no
+    # viewport width, so guessing would be wrong on a tablet either way.
+    _compact = bh[1].toggle("Compact", value=False, key="compact_cols",
+                            help="Fewer columns — fits a phone screen without scrolling.")
+    if _which == "market":
+        _pool = (sorted([p for p in res["best_available"] if p.get("adp")],
+                        key=lambda x: x["adp"])
+                 + [p for p in res["best_available"] if not p.get("adp")])
+    else:
+        _pool = res[_which]
     rows = []
-    for p in res["best_available"][:40]:
+    _cur = res["current_overall"]
+    for p in _pool[:60]:
+        _adp = p.get("adp")
         rows.append({
             "Player": p["name"], "Pos": f"{p['pos']}{p['posrank']}", "Tm": p.get("team"),
+            "Bye": p.get("bye"),
+            # Score IS the pick. VOR is only one of its three terms, so a board that
+            # shows VOR alone hides why a 3rd TE or an early kicker is not the pick.
+            "Score": p.get("rec_score"),
             "VOR": p["vor"], "Tier": f"{p['pos']}T{p['tier']}" if p.get("tier") else "",
             # In best ball the pick is made on MARGINAL VALUE, not VOR. Showing
             # only VOR would display one number while deciding on another --
@@ -550,7 +692,13 @@ with left:
                          else round(p["bb"] - (p.get("bb_repl") or 0.0)))}
                if bb_mode else {}),
             "Surv%": round((p.get("survival") or 1) * 100),
-            "ADP": p.get("adp"), "CoW": p.get("cost_of_waiting"),
+            "ADP": _adp,
+            # how far past his own ADP he has already fallen. Positive = the market
+            # would have taken him by now and has not, i.e. he is on sale AT THIS
+            # PICK. This is the number a room reads out loud ("he's 20 picks past
+            # ADP"), and it is not derivable from the ADP column alone mid-draft.
+            "vsADP": (None if _adp is None else round(_cur - _adp)),
+            "CoW": p.get("cost_of_waiting"),
             # Arc  = where OUR projection sits inside the comp distribution
             # Decl% = share of those comps who fell off >25% the next year
             # Both are needed: at the top of the board almost everyone reads high
@@ -561,93 +709,64 @@ with left:
             "Decl%": p.get("decl"),
         })
     df = pd.DataFrame(rows)
-    _grad = "Edge" if (bb_mode and "Edge" in df.columns) else "VOR"
-    _fmt = {"VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}", "Surv%": "{:.0f}",
-            "Decl%": "{:.0f}"}
+    if _compact:
+        _keep = ["Player", "Pos", "Score", "Tier", "Surv%", "vsADP"]
+        if bb_mode:
+            _keep = ["Player", "Pos", "BB", "Edge", "Surv%", "vsADP"]
+        df = df[[c for c in _keep if c in df.columns]]
+    _grad = "Edge" if (bb_mode and "Edge" in df.columns) else "Score"
+    _fmt = {"Score": "{:.0f}", "VOR": "{:.0f}", "ADP": "{:.0f}", "CoW": "{:.0f}",
+            "Surv%": "{:.0f}", "Decl%": "{:.0f}", "vsADP": "{:+.0f}", "Bye": "{:.0f}"}
     if bb_mode:
         _fmt.update({"BB": "{:.0f}", "Edge": "{:.0f}"})
     sty = (df.style
            .background_gradient(subset=[_grad], cmap="Greens")
            .background_gradient(subset=["Surv%"], cmap="RdYlGn")
-           .format(_fmt, na_rep="—"))
+           .background_gradient(subset=["vsADP"], cmap="PuOr")
+           .format({k: v for k, v in _fmt.items() if k in df.columns}, na_rep="—"))
+    # Pin the name so it stays put while the numbers scroll. Without this a phone
+    # user scrolls right to read Surv% and can no longer see WHOSE it is.
+    _colcfg = {"Player": st.column_config.TextColumn("Player", pinned=True, width=150)}
+    for _c, _w in (("Pos", 58), ("Tm", 48), ("Bye", 44), ("Score", 62), ("VOR", 56),
+                   ("Tier", 58), ("Surv%", 62), ("ADP", 56), ("vsADP", 62),
+                   ("CoW", 54), ("Arc", 54), ("Decl%", 60), ("BB", 56), ("Edge", 58)):
+        if _c in df.columns:
+            _colcfg[_c] = st.column_config.Column(_c, width=_w)
     # the whole board is a pick control, not just the five chips above. Keying the
     # widget on the pick count gives each pick a FRESH selection -- otherwise the
     # row stays selected through the rerun and re-fires do_pick every time.
-    _sel = st.dataframe(sty, width="stretch", hide_index=True, height=560,
+    _sel = st.dataframe(sty, width="stretch", hide_index=True, height=620,
+                        column_config=_colcfg,
                         selection_mode="single-row", on_select="rerun",
-                        key=f"ba_{len(ss.drafted)}")
+                        key=f"ba_{len(ss.drafted)}_{_which}_{int(_compact)}")
     _rows = list(getattr(getattr(_sel, "selection", None), "rows", None) or [])
     if _rows and not done:
-        do_pick(res["best_available"][_rows[0]]["id"])
+        do_pick(_pool[_rows[0]]["id"])
         st.rerun()
     st.caption("👆 Tap any row to draft that player." if on_clock_me
-               else ("" if done else f"👆 Tap any row to mark them drafted by Team {res['on_clock']}."))
-    st.caption(
-        "**Arc** = where our projection sits in the distribution of what comparable "
-        "players did NEXT (same position, same career year, similar draft pedigree "
-        "and record up to that point). `!` = we project above almost all of them; "
-        "`+` = below most. **Decl%** = share of those comps who fell off >25%. "
-        "Read them together: near the top of the board nearly everyone reads high on "
-        "Arc, so Decl% is what separates an aggressive projection from a risky one.")
+               else ("" if done else
+                     f"👆 Tap any row to mark them drafted by {seat_name(res['on_clock'])}."))
+    with st.expander("What the columns mean"):
+        st.markdown(
+            "- **VOR** — points above the last startable player at his position *in this league*.\n"
+            "- **Surv%** — chance he lasts to your next pick (Monte-Carlo on ADP + the live run read).\n"
+            "- **vsADP** — picks past his own ADP he has already fallen. `+20` = a bargain here; "
+            "`−20` = taking him now is a reach.\n"
+            "- **CoW** — cost of waiting: value you lose at that position by passing this round.\n"
+            "- **Arc** — where our projection sits in the distribution of what comparable players "
+            "did NEXT (same position, career year, pedigree). `!` = we project above almost all of "
+            "them; `+` = below most. **Decl%** = share of those comps who fell off >25%. "
+            "Read them together — near the top of the board nearly everyone reads high on Arc, so "
+            "Decl% is what separates an aggressive projection from a risky one.")
 
-with right:
-    if ss.drafted:
-        n = len(ss.drafted)
-        # in a mock the room moves several picks between your turns, so what you
-        # actually want to see is "what went off the board while I waited"
-        since = int(ss.get("last_my_pick") or 0)
-        window = n - since if (since and n > since) else min(8, n)
-        st.subheader(f"Gone since your last pick ({window})" if since and n > since
-                     else "Recently drafted")
-        rrows = []
-        for overall in range(n, max(0, n - window), -1):
-            p = by_id.get(ss.drafted[overall - 1])
-            if not p:
-                continue
-            slot = team_on_clock(cfg, overall)
-            # `by_id` holds RAW board dicts -- _vor only exists on analyze()'s
-            # internal copy, so reading it here would render a silently blank
-            # column. ADP is on the board itself and is the useful read anyway:
-            # it shows who is going early vs the market.
-            rrows.append({"Pk": overall, "By": ("YOU" if slot == cfg.my_slot else f"T{slot}"),
-                          "Player": p["name"], "Pos": p["pos"], "ADP": p.get("adp")})
-        st.dataframe(pd.DataFrame(rrows), hide_index=True, width="stretch", height=180)
+# --------------------------------------------------------------------------- rails
+r1, r2, r3 = st.columns([2, 2, 2], gap="medium")
 
-    with st.expander("👥 Team rosters — see what every seat has"):
-        _sl = st.selectbox("Team", list(range(1, cfg.teams + 1)),
-                           index=cfg.my_slot - 1,
-                           format_func=lambda s: f"Team {s}" + (" ★ you" if s == cfg.my_slot else ""))
-        _r = team_roster(_sl)
-        if _r:
-            st.dataframe(pd.DataFrame([{"Pk": o, "Pos": p["pos"], "Player": p["name"],
-                                        "Tm": p.get("team")} for o, p in _r]),
-                         hide_index=True, width="stretch", height=240)
-            _c = pd.Series([p["pos"] for _, p in _r]).value_counts()
-            st.caption("  ".join(f"{k} {v}" for k, v in _c.items()))
-        else:
-            st.caption("No picks yet.")
+with r1:
+    st.markdown('<div class="dw-h">📊 Position run — last 24 picks</div>', unsafe_allow_html=True)
+    st.markdown(run_strip_html(cfg, ss.drafted, by_id, sstate), unsafe_allow_html=True)
 
-    if len(ss.drafted) >= 2 * cfg.teams and not done:
-        g = grade_draft(cfg, ss.drafted, working)
-        st.subheader("Final draft grade" if res["my_next_pick"] is None else "Draft grade so far")
-        gc1, gc2 = st.columns([1, 2])
-        gc1.metric("Grade", g["grade"])
-        gc2.metric(f"Rank {g['my_rank']}/{g['teams']}",
-                   f"{g['pctile']}th pctile · {g['my_value']} vs lg avg {g['league_avg']}")
-
-    st.subheader("Your roster")
-    if res["my_roster"]:
-        st.dataframe(pd.DataFrame([{"Pos": p["pos"], "Player": p["name"], "VOR": p["vor"]}
-                                   for p in res["my_roster"]],
-                                  ), width="stretch", hide_index=True)
-    else:
-        st.caption("No picks yet.")
-    need = res["needs"]
-    st.caption("Roster need (higher = more urgent): " +
-               "  ".join(f"{k} {v:+.0f}" for k, v in sorted(need.items(), key=lambda x: -x[1])
-                        if k not in ("K", "DST") or v > -20))
-
-    st.subheader("Strategy read")
+    st.markdown('<div class="dw-h">🎯 Strategy read</div>', unsafe_allow_html=True)
     note = res["strategy"]["note"]
     if note:
         st.info(note)
@@ -662,7 +781,29 @@ with right:
         st.caption("Value lost by waiting a round: "
                    + ", ".join(f"{k} −{v:.0f}" for k, v in sorted(cow.items(), key=lambda x: -x[1])))
 
-    st.subheader("Tiers remaining")
+with r2:
+    st.markdown('<div class="dw-h">👤 Your roster</div>', unsafe_allow_html=True)
+    if res["my_roster"]:
+        st.dataframe(pd.DataFrame([{"Pos": p["pos"], "Player": p["name"], "VOR": p["vor"]}
+                                   for p in res["my_roster"]]),
+                     width="stretch", hide_index=True, height=min(320, 40 + 35 * len(res["my_roster"])))
+    else:
+        st.caption("No picks yet.")
+    need = res["needs"]
+    st.caption("Roster need (higher = more urgent): " +
+               "  ".join(f"{k} {v:+.0f}" for k, v in sorted(need.items(), key=lambda x: -x[1])
+                         if k not in ("K", "DST") or v > -20))
+
+    if len(ss.drafted) >= 2 * cfg.teams and not done:
+        g = grade_draft(cfg, ss.drafted, working)
+        st.markdown('<div class="dw-h">📈 Draft grade so far</div>', unsafe_allow_html=True)
+        gc1, gc2 = st.columns([1, 2])
+        gc1.metric("Grade", g["grade"])
+        gc2.metric(f"Rank {g['my_rank']}/{g['teams']}",
+                   f"{g['pctile']}th pctile · {g['my_value']} vs lg avg {g['league_avg']}")
+
+with r3:
+    st.markdown('<div class="dw-h">🪜 Tiers remaining</div>', unsafe_allow_html=True)
     tier_rows = []
     seen = set()
     for p in sorted(res["best_available"], key=lambda x: (x["pos"], x.get("tier") or 99)):
@@ -676,6 +817,116 @@ with right:
     if tier_rows:
         st.dataframe(pd.DataFrame(tier_rows).sort_values(["Pos", "Tier"]),
                      width="stretch", hide_index=True, height=260)
+
+# --------------------------------------------------------------------------- tabs
+st.divider()
+t_board, t_teams, t_feed, t_plan, t_mark = st.tabs(
+    ["🗺️ Draft board", "👥 Team rosters", "📜 Pick feed", "📋 Draft plan", "🔍 Mark a pick"])
+
+with t_board:
+    _full = st.toggle("Show all rounds", value=False,
+                      help="Off = a window around the live pick, which is what fits on a phone.")
+    st.markdown(draft_board_html(cfg, sstate, ss.drafted, by_id,
+                                 rounds_window=None if _full else 7),
+                unsafe_allow_html=True)
+    st.caption("Colored = drafted (by position) · ★ = your seat · orange = on the clock · "
+               "blue = your future picks"
+               + (" · ⇄ = traded pick, now the tagged team's" if sstate else ""))
+
+with t_teams:
+    st.markdown('<div class="dw-h">Roster shape — every seat</div>', unsafe_allow_html=True)
+    st.markdown(roster_matrix_html(cfg, sstate, ss.drafted, by_id, cfg.starters),
+                unsafe_allow_html=True)
+    st.caption("“Still needs” counts unfilled STARTING slots (FLEX not included) — "
+               "a seat that owes a QB in round 12 is taking a QB.")
+    st.divider()
+    _sl = st.selectbox("Inspect a team", list(range(1, cfg.teams + 1)),
+                       index=min(cfg.my_slot, cfg.teams) - 1,
+                       format_func=lambda s: seat_name(s) + (" ★ you" if s == cfg.my_slot else ""))
+    _r = team_roster(_sl)
+    if _r:
+        st.dataframe(pd.DataFrame([{"Pk": o, "At": pick_label(cfg, o), "Pos": p["pos"],
+                                    "Player": p["name"], "Tm": p.get("team"),
+                                    "Bye": p.get("bye")} for o, p in _r]),
+                     hide_index=True, width="stretch", height=300)
+        _c = pd.Series([p["pos"] for _, p in _r]).value_counts()
+        st.caption("  ".join(f"{k} {v}" for k, v in _c.items()))
+    else:
+        st.caption("No picks yet.")
+
+with t_feed:
+    if ss.drafted:
+        n = len(ss.drafted)
+        since = int(ss.get("last_my_pick") or 0)
+        window = n - since if (since and n > since) else min(24, n)
+        st.markdown(f'<div class="dw-h">'
+                    + (f"Gone since your last pick ({window})" if since and n > since
+                       else "Recently drafted")
+                    + '</div>', unsafe_allow_html=True)
+        rrows = []
+        for overall in range(n, max(0, n - max(window, 24)), -1):
+            p = by_id.get(ss.drafted[overall - 1])
+            if not p:
+                continue
+            slot = team_on_clock(cfg, overall)
+            # `by_id` holds RAW board dicts -- _vor only exists on analyze()'s
+            # internal copy, so reading it here would render a silently blank
+            # column. ADP is on the board itself and is the useful read anyway:
+            # it shows who is going early vs the market.
+            rrows.append({"Pk": overall, "At": pick_label(cfg, overall),
+                          "By": ("★ YOU" if slot == cfg.my_slot else seat_name(slot)),
+                          "Player": p["name"], "Pos": p["pos"], "ADP": p.get("adp"),
+                          "vs ADP": (None if p.get("adp") is None
+                                     else round(overall - p["adp"]))})
+        st.dataframe(pd.DataFrame(rrows), hide_index=True, width="stretch", height=420)
+        st.caption("**vs ADP** — positive means he lasted past his ADP (a value pick), "
+                   "negative means that team reached.")
+    else:
+        st.caption("No picks yet.")
+
+with t_plan:
+    st.caption("Monte-Carlo your remaining picks (opponents pick by ADP, you by your Strategy) "
+               "to see your likely build path and where each position's value dries up.")
+    if bb_mode:
+        # plan_draft picks its simulated future selves with effective_vor /
+        # roster_factor / need -- the redraft value model. In best ball the
+        # actual recommendation comes from bestball.py instead, so the plan
+        # would confidently describe a build the wizard will not make. A plan
+        # that contradicts the pick is worse than no plan, so it is disabled
+        # rather than shown with a caveat. (Porting it means routing its
+        # my-pick policy through _bb_values, the same one-helper rule that
+        # ROSTER_INTERP needed.)
+        st.info("Not available in Best Ball mode — the forward planner still "
+                "uses the redraft value model, so it would contradict the "
+                "recommendation. Tracked as a follow-up.")
+    elif st.button("Run / refresh plan", key="planbtn", type="primary"):
+        ss["plan"] = plan_draft(working, cfg, ss.drafted, n_sims=150)
+    plan = ss.get("plan")
+    if plan and plan.get("picks"):
+        if plan.get("note"):
+            st.write("**" + plan["note"] + "**")
+        prows = [{
+            "Pick": p["pick_no"], "At": pick_label(cfg, p["pick_no"]), "Rd": p["round"],
+            "Target": p["top_pos"],
+            "Conf": f"{int(max(p['pos_probs'].values())*100)}%" if p["pos_probs"] else "",
+            "ExpVOR": p["exp_vor"],
+            "Often there": ", ".join(e.split()[-1] for e in p["examples"]),
+        } for p in plan["picks"][:14]]
+        st.dataframe(pd.DataFrame(prows), hide_index=True, width="stretch")
+
+with t_mark:
+    if not done:
+        undrafted = [p for p in working if p["id"] not in set(ss.drafted)]
+        label = {f"{p['name']} · {p['pos']}-{p.get('team','')}": p["id"] for p in undrafted}
+        _prompt = ("Search a player to draft:" if (st.session_state.get("practice") or on_clock_me)
+                   else "Search a player who was just drafted:")
+        pick_label_sel = st.selectbox(_prompt, [""] + list(label.keys()))
+        if st.button("Mark drafted", type="primary") and pick_label_sel:
+            do_pick(label[pick_label_sel]); st.rerun()
+        st.caption("Use this for anyone not in the top 60 — kickers, defenses, or a "
+                   "name our board ranks lower than the room does.")
+    else:
+        st.caption("Draft complete.")
 
 _mode_lbl = "Rookie" if rookie_mode else ("Best Ball" if bb_mode else "Redraft")
 _basis = ("dynasty value (our model + age curve)" if rookie_mode else

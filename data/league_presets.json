@@ -25,12 +25,12 @@
       "league_id": "1386575109178818560"
     },
     {
-      "name": "ReDrafters Rejoice  \u2014 12T SF PPR",
+      "name": "ReDrafters Rejoice  \u2014 12T 1QB PPR",
       "kind": "redraft",
       "teams": 12,
       "scoring": "ppr",
-      "superflex": true,
-      "rounds": 16,
+      "superflex": false,
+      "rounds": 15,
       "snake": true,
       "bench": 6,
       "te_premium": null,
@@ -40,7 +40,7 @@
         "WR": 2,
         "TE": 1,
         "FLEX": 2,
-        "SUPERFLEX": 1,
+        "SUPERFLEX": 0,
         "K": 0,
         "DST": 1
       },

@@ -813,6 +813,15 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
                 p["_bb"] = None
                 p["_rec_score"] = round(floor - 1.0 + p["_vor"] / 1e4, 2)
 
+    # TWO orderings, and the UI must never show one while deciding on the other.
+    # `remaining` is the DECISION order (_rec_score = effective VOR + scarcity +
+    # need): it is roster-aware, so a 3rd TE or an early kicker sinks. `best_available`
+    # is raw positional VOR: who is the best player left, ignoring your roster.
+    # ⭐ They disagree hard on K/DST. At pick 73 of a 15-round league Brandon Aubrey
+    # is VOR 39.4 -- second on the raw board -- while his _rec_score is -28.0, below
+    # every startable player. Showing only the VOR order put a kicker at #2 on the
+    # board (and in the quick-pick chips) in round 7 while the engine would never
+    # have taken him. Both are returned so the app can label which one it is showing.
     remaining.sort(key=lambda x: -x["_rec_score"])
     best_available = sorted(remaining, key=lambda x: -x["_vor"])
 
@@ -853,6 +862,10 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         "needs": need,
         "recommendation": reco,
         "alternates": [_slim(p, full=True) for p in remaining[1:6]],
+        # `ranked` is the same 60-deep window taken from the DECISION order, so the
+        # app can offer it without re-sorting a VOR-truncated list (a player with a
+        # big cost-of-waiting can rank high for you and sit outside the VOR top 60)
+        "ranked": [_slim(p, full=True) for p in remaining[:60]],
         "best_available": [_slim(p, full=True) for p in best_available[:60]],
         "cost_of_waiting": cow,
         "ebest_next": {k: round(v, 1) for k, v in ebest.items()},

@@ -1,0 +1,21 @@
+# Pin the theme for the DEPLOYED app.
+#
+# Without this Streamlit Community Cloud follows the VIEWER's system preference,
+# so the same build renders light on a phone in light mode -- and the draft board,
+# on-deck queue and status bar are hand-written HTML with dark backgrounds baked in
+# (draft_board.py: PANEL #0f172a, FIELD #0b1220). On a light page they would be dark
+# slabs on white. Pinning dark is what makes the custom panels and Streamlit's own
+# widgets agree, on every device, without maintaining two palettes.
+[theme]
+base = "dark"
+primaryColor = "#f59e0b"
+backgroundColor = "#020617"
+secondaryBackgroundColor = "#0f172a"
+textColor = "#e2e8f0"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
