@@ -29,10 +29,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from draft_engine import (load_board, LeagueConfig, analyze, plan_draft,   # noqa: E402
                           ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance,
                           team_on_clock, grade_draft)
+import draft_review as DR                                    # noqa: E402
+import mock_history as MH                                    # noqa: E402
 from draft_board import (draft_board_html, on_deck_html, run_strip_html,     # noqa: E402
                          roster_matrix_html, team_rosters_html, status_bar_html,
                          slot_team, pick_label, POS_BG)
-from draft_names import norm_name, pos_norm                          # noqa: E402
+from draft_names import norm_name, pos_norm, surname                          # noqa: E402
 
 # quick-league presets (the main axes; roster stays standard, your slot is separate)
 PRESETS = {
@@ -110,18 +112,6 @@ def get_board():
 # generational suffix, so that renders Marvin Harrison Jr. as a chip labelled
 # "Jr. · WR" -- and there are three different Jr.s inside the top 80, so the
 # label is not just ugly, it is ambiguous. Seen live in a mock at pick 63.
-_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
-
-
-def surname(name: str) -> str:
-    parts = [x for x in str(name or "").split() if x]
-    if parts and parts[-1].upper() in ("DST", "D/ST", "DEF"):
-        return " ".join(parts)          # "SEA DST", not "DST"
-    while len(parts) > 1 and parts[-1].lower().strip(".") in {s.strip(".") for s in _SUFFIXES}:
-        parts.pop()
-    return parts[-1] if parts else str(name or "")
-
-
 def arc_flag(p) -> str:
     """Compact signal for the board. A HIGH percentile means we are projecting
     ABOVE what comparable players actually did -- a caution, not praise.
@@ -171,6 +161,10 @@ def revalue_rookies(rb, superflex):
 board = get_board()
 ss = st.session_state
 ss.setdefault("drafted", [])          # ordered list of drafted player ids
+# The practice room's seed. Generated once per session so it is a number you can
+# write down and come back to; "Replay room" reuses it, "New room" rerolls it.
+if "room_seed" not in ss:
+    ss["room_seed"] = int(np.random.default_rng().integers(1000, 999999))
 
 mode = st.sidebar.radio("Draft type", ["Redraft", "Best Ball", "Rookie (dynasty)"],
                         horizontal=True)
@@ -295,7 +289,8 @@ def do_pick(pid):
     # step controls have something to step: otherwise every pick lands you back
     # on the clock and "one pick" is always a no-op.
     if st.session_state.get("practice") and ss.get("auto_adv", True):
-        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
+        ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted,
+                                 None, seed=ss['room_seed'])
 
 
 def team_roster(slot):
@@ -494,7 +489,7 @@ if not ss["started"]:
     _sf = " Superflex" if cfg.superflex else ""
     _summ = f"**{mode}** · {cfg.teams}-team {cfg.scoring.upper()}{_sf} · your slot **{cfg.my_slot}** · {cfg.total_rounds()} rounds"
     if ss.get("practice"):
-        _summ += " · 🎮 practice (AI drafts the other teams)"
+        _summ += f" · 🎮 practice vs AI · room **#{ss['room_seed']}**"
     st.info(_summ)
     st.caption(f"Board: **{len(working)}** players · "
                f"**{sum(1 for p in working if p.get('adp'))}** with live ADP")
@@ -503,7 +498,7 @@ if not ss["started"]:
         ss.pop("plan", None)
         ss["last_my_pick"] = 0
         if ss.get("practice"):
-            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], None, seed=ss['room_seed'])
         ss["started"] = True
         st.rerun()
     st.caption("Set your league, strategy, slot, and Redraft/Rookie + Practice in the sidebar "
@@ -513,7 +508,8 @@ if not ss["started"]:
     st.stop()
 
 # --------------------------------------------------------------------------- analyze
-res = analyze(working, cfg, ss.drafted)
+res = analyze(working, cfg, ss.drafted,
+              seed=(ss["room_seed"] if ss.get("practice") else None))
 on_clock_me = res["on_clock"] == cfg.my_slot
 done = res["complete"]
 sstate = ss.get("sleeper_state")
@@ -581,16 +577,20 @@ if st.session_state.get("practice"):
         pc.caption(f"AI drafts the other {cfg.teams - 1} teams off ADP; you pick your own.")
         pcc = pc.columns(4)
         if pcc[0].button("▶ Sim to my pick", width="stretch", disabled=done):
-            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted, np.random.default_rng())
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted,
+                                 None, seed=ss['room_seed'])
             st.rerun()
         if pcc[1].button("⏱ One pick", width="stretch", disabled=done or on_clock_me,
                          help="Advance the room a single pick so you can watch it develop. "
                               "Needs auto-advance off, otherwise the room is already at your turn."):
             ss.drafted = mock_advance(prep_valued(working, cfg), cfg, ss.drafted,
-                                      np.random.default_rng(), max_picks=1)
+                                      None, max_picks=1, seed=ss["room_seed"])
             st.rerun()
-        if pcc[2].button("🔄 New mock", width="stretch"):
-            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
+        if pcc[2].button("🔄 Replay room", width="stretch",
+                         help="Start over against the SAME opponents. Make different "
+                              "picks and you can see what the other build would have "
+                              "got you."):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], None, seed=ss['room_seed'])
             ss.pop("plan", None); ss["last_my_pick"] = 0
             st.rerun()
         _auto = pcc[3].button("⏭ Auto-draft rest", width="stretch", disabled=done,
@@ -598,20 +598,55 @@ if st.session_state.get("practice"):
         pc.checkbox("Auto-advance to my next pick", key="auto_adv", value=True,
                     help="Off = the room stays where it is after you pick, so you can step "
                          "through the other teams one pick at a time.")
+        # ⭐ The room seed, exposed so a practice draft is repeatable. Without it
+        # every mock draws a fresh room (measured: 12/12 distinct pick orders,
+        # though 88% the same players early), which makes it impossible to ask
+        # "what would zero-RB have got me against THAT draft?" -- the thing you
+        # most want practice for.
+        sc = pc.columns([2, 1, 3])
+        # ⚠ the key must carry the seed. With a FIXED key the widget's persisted
+        # value wins the next rerun, so "New room" set a fresh seed, rerendered,
+        # and this input immediately wrote the OLD one back -- the button looked
+        # dead. Streamlit will not let you assign a widget's key after it is
+        # instantiated, so the fix is a key that changes with the value.
+        _new_seed = sc[0].number_input("Room seed", 1, 999999, int(ss["room_seed"]),
+                                       step=1, key=f"seed_input_{ss['room_seed']}",
+                                       help="Same seed = the same opponents behaving the "
+                                            "same way. Write it down to come back to a "
+                                            "room, or type a friend's to draft the same one.")
+        if int(_new_seed) != int(ss["room_seed"]):
+            ss["room_seed"] = int(_new_seed)
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], None,
+                                      seed=ss["room_seed"])
+            ss.pop("plan", None); ss["last_my_pick"] = 0
+            st.rerun()
+        sc[1].write("")
+        if sc[1].button("🎲 New room", width="stretch",
+                        help="Roll a different set of opponents."):
+            ss["room_seed"] = int(np.random.default_rng().integers(1000, 999999))
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], None,
+                                      seed=ss["room_seed"])
+            ss.pop("plan", None); ss["last_my_pick"] = 0
+            st.rerun()
+        sc[2].caption(f"Room **#{ss['room_seed']}** — “Replay room” restarts this exact "
+                      f"draft, so you can try a different strategy against the same "
+                      f"opponents and compare.")
         # a fixed slot inside the practice panel, written to from the loop below --
         # auto-drafting a full board runs a Monte-Carlo per remaining round, which is
         # several seconds of silence otherwise
         prog = pc.empty()
         if _auto:
-            valued = prep_valued(working, cfg); rng = np.random.default_rng()
+            valued = prep_valued(working, cfg)
             total = total_picks(); guard = 0
             while len(ss.drafted) < total and guard < total + 5:
-                ss.drafted = mock_advance(valued, cfg, ss.drafted, rng)
+                ss.drafted = mock_advance(valued, cfg, ss.drafted, None,
+                                          seed=ss["room_seed"])
                 if len(ss.drafted) >= total:
                     break
                 # a cheaper sim than the on-screen default: this runs once per remaining
                 # round, and the pick only needs the ranking, not 4-digit survival odds
-                _r = analyze(working, cfg, ss.drafted, n_sims=300).get("recommendation")
+                _r = analyze(working, cfg, ss.drafted, n_sims=300,
+                             seed=ss["room_seed"]).get("recommendation")
                 if not _r:
                     break
                 ss.drafted.append(_r["id"]); guard += 1
@@ -622,22 +657,70 @@ if st.session_state.get("practice"):
 # --------------------------------------------------------------------------- draft complete
 if done:
     g = grade_draft(cfg, ss.drafted, working)
+    _seed = ss["room_seed"] if ss.get("practice") else None
+    if ss.get("review_for") != len(ss.drafted):
+        ss["review"] = DR.review(working, cfg, ss.drafted, seed=_seed)
+        ss["review_for"] = len(ss.drafted)
+        # log it once per completed draft
+        ss.setdefault("mock_history", MH.merge(MH.load_disk(), []))
+        if ss.get("practice"):
+            ss["mock_history"] = MH.merge(ss["mock_history"],
+                                          [MH.record(cfg, _seed, g["grade"], ss["review"], mode)])
+            ss["hist_saved"] = MH.save_disk(ss["mock_history"])
+    rv = ss["review"]
+
     fin = st.container(border=True)
-    fin.markdown(f"### 🏁 Draft complete — {res['total_picks']} picks over {cfg.total_rounds()} rounds")
-    fm = fin.columns(3)
+    fin.markdown(f"### 🏁 Draft complete — {res['total_picks']} picks over {cfg.total_rounds()} rounds"
+                 + (f"  ·  room **#{_seed}**" if _seed else ""))
+    fm = fin.columns(4)
     fm[0].metric("Your grade", g["grade"])
-    fm[1].metric("Finish", f"{g['my_rank']} of {g['teams']}")
-    fm[2].metric("Value banked", f"{g['my_value']:.0f}",
-                 delta=f"{g['my_value'] - g['league_avg']:+.0f} vs league avg")
-    if g.get("best_pick"):
-        fin.caption(f"Best pick: **{g['best_pick'][0]}** — {g['best_pick'][2]}, VOR {g['best_pick'][1]:.0f}")
-    fin.caption("The grade ranks your roster's total positive VOR against the other teams "
-                "**on our own board's valuation**. In practice mode the AI drafts off ADP, so it "
-                "measures how far you beat the market *by our numbers* — it is not a projected finish.")
+    fm[1].metric("Finish", f"{rv['rank']} of {rv['teams']}")
+    fm[2].metric("Value banked", f"{rv['grade_value']}",
+                 delta=f"{rv['edge']:+d} vs league avg")
+    fm[3].metric("Avg vs ADP", f"{rv['avg_vs_adp']:+.1f}" if rv["avg_vs_adp"] is not None else "—",
+                 help="Mean (pick number − that player's ADP) across your picks. "
+                      "Positive = the room let players fall to you; negative = you reached.")
+
+    fin.markdown("**Where you gained and lost it**")
+    _pr = pd.DataFrame([{"Pos": r["pos"], "You": r["n"], "Your value": r["value"],
+                         "League avg": r["league_avg"], "Edge": r["edge"],
+                         "Your best": r["best"]} for r in rv["positions"]])
+    fin.dataframe(_pr, hide_index=True, width="stretch")
+    _note = DR.position_note(rv)
+    if _note:
+        fin.caption(_note)
+
+    if rv.get("replayable"):
+        fin.markdown(f"**💡 Where you left value** — {DR.headline(rv)}")
+        if rv["misses"]:
+            for m in rv["misses"]:
+                fin.markdown("- " + DR.miss_sentence(m))
+        fin.caption(
+            "These are **exact, not estimated**: for each one the room was REPLAYED "
+            "from that pick with the other player in your seat and the same seed, so "
+            "“he was still there” is something that actually happened in an "
+            "alternative draft rather than a survival guess. ⚠ It is still hindsight "
+            "— you only know who went where afterwards — so read it as a drill, not a "
+            "scorecard. Only misses worth ≥12 VOR are shown, and value below "
+            "replacement is floored at zero (a bench body you would never start is "
+            "worth 0, not −30).")
+    else:
+        fin.caption("Run this as a **practice** mock to get the “where you left value” "
+                    "review — it needs the room's seed to replay the counterfactual.")
+
     if st.session_state.get("practice"):
-        if fin.button("🔄 Run another mock", type="primary", key="again", width="stretch"):
-            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], np.random.default_rng())
-            ss.pop("plan", None); ss["last_my_pick"] = 0
+        fc = fin.columns(2)
+        if fc[0].button("🔄 Replay this room", type="primary", key="again", width="stretch",
+                        help="Same opponents, same seed — try a different strategy."):
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], None, seed=ss["room_seed"])
+            ss.pop("plan", None); ss.pop("review", None); ss.pop("review_for", None)
+            ss["last_my_pick"] = 0
+            st.rerun()
+        if fc[1].button("🎲 New room", key="again_new", width="stretch"):
+            ss["room_seed"] = int(np.random.default_rng().integers(1000, 999999))
+            ss.drafted = mock_advance(prep_valued(working, cfg), cfg, [], None, seed=ss["room_seed"])
+            ss.pop("plan", None); ss.pop("review", None); ss.pop("review_for", None)
+            ss["last_my_pick"] = 0
             st.rerun()
 
 # --------------------------------------------------------------------------- THE PICK
@@ -944,8 +1027,9 @@ with r3:
 
 # --------------------------------------------------------------------------- tabs
 st.divider()
-t_board, t_teams, t_feed, t_plan, t_mark = st.tabs(
-    ["🗺️ Draft board", "👥 Team rosters", "📜 Pick feed", "📋 Draft plan", "🔍 Mark a pick"])
+t_board, t_teams, t_feed, t_plan, t_mark, t_hist = st.tabs(
+    ["🗺️ Draft board", "👥 Team rosters", "📜 Pick feed", "📋 Draft plan",
+     "🔍 Mark a pick", "📚 Mock history"])
 
 with t_board:
     _full = st.toggle("Show all rounds", value=False,
@@ -1067,3 +1151,62 @@ _basis = ("dynasty value (our model + age curve)" if rookie_mode else
            else "consensus = our model + Waldman blend, Clay ECR, FFC ADP"))
 st.caption(f"{_mode_lbl} board: {len(working)} players · "
            f"{res['board_size_remaining']} undrafted · " + _basis)
+
+
+with t_hist:
+    ss.setdefault("mock_history", MH.merge(MH.load_disk(), []))
+    hist = ss["mock_history"]
+    if not hist:
+        st.caption("No finished mocks yet. Complete a practice draft and it lands here.")
+    else:
+        smry = MH.summarise(hist)
+        hc = st.columns(3)
+        hc[0].metric("Mocks logged", smry["n"])
+        hc[1].metric("Average finish", f"{smry['avg_finish']} of {hist[-1]['teams']}"
+                     if smry.get("avg_finish") else "—")
+        hc[2].metric("Avg left on the board", f"{smry['avg_left']} VOR",
+                     help="Mean total value your reviewed misses cost you per mock. "
+                          "This is the number to drive down.")
+        if smry.get("pos_edge"):
+            st.caption("Your average edge by position across all logged mocks: "
+                       + "  ·  ".join(f"**{k}** {v:+d}" for k, v in
+                                      sorted(smry["pos_edge"].items(), key=lambda x: -x[1]))
+                       + " — a consistently negative position is a habit, not variance.")
+        st.dataframe(pd.DataFrame([{
+            "When": r["when"], "Room": r["room"], "League": f"{r['teams']}T {r['scoring'].upper()}"
+                                                            + (" SF" if r.get("superflex") else ""),
+            "Slot": r["slot"], "Grade": r["grade"], "Finish": r["rank"],
+            "Value": r["value"], "vs avg": r["edge"], "Roster": r["shape"],
+            "Misses": r["n_misses"], "Left": r["left_on_board"],
+            "Biggest miss": r.get("top_miss"),
+        } for r in reversed(hist)]), hide_index=True, width="stretch", height=340)
+
+    st.divider()
+    # ⚠ Streamlit Cloud's filesystem is EPHEMERAL -- a write succeeds and then
+    # disappears on the next restart, and is not shared across devices. Saying
+    # "saved" on the strength of the write landing would be a lie on the phone, so
+    # report what actually happened and make Download the durable path.
+    if ss.get("hist_saved"):
+        st.caption("Saved to `data/mock_history.json` on this machine. ⚠ On the "
+                   "hosted app that file does **not** survive a restart — use "
+                   "Download to keep a copy.")
+    else:
+        st.caption("⚠ Kept for this session only — the hosted app has no durable "
+                   "storage. Download to keep it.")
+    dc = st.columns(2)
+    dc[0].download_button("⬇ Download history (JSON)",
+                          data=json.dumps({"mocks": hist}, indent=1),
+                          file_name="mock_history.json", mime="application/json",
+                          width="stretch", disabled=not hist)
+    up = dc[1].file_uploader("⬆ Restore a downloaded history", type="json",
+                             label_visibility="collapsed")
+    if up is not None:
+        try:
+            rows = json.loads(up.read().decode("utf-8")).get("mocks", [])
+            before = len(ss["mock_history"])
+            ss["mock_history"] = MH.merge(ss["mock_history"], rows)
+            MH.save_disk(ss["mock_history"])
+            st.success(f"Restored — {len(ss['mock_history']) - before} new of "
+                       f"{len(rows)} (duplicates skipped).")
+        except Exception as e:
+            st.error(f"Could not read that file: {e}")

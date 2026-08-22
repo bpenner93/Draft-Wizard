@@ -46,18 +46,24 @@ def ok(msg):
     print(f"  ✓ {msg}")
 
 
-# draft_app is a Streamlit script and cannot be imported, so lift the two pure
-# display helpers out of it by source. If either is renamed this raises, which is
+# `surname` now lives in draft_names, where both the app and draft_review import
+# it from -- it had been re-derived (wrongly) twice before it was shared.
+from draft_names import surname          # noqa: E402
+
+
+# draft_app is a Streamlit script and cannot be imported, so lift the remaining
+# pure display helper out of it by source. If it is renamed this raises, which is
 # the correct outcome -- a silently-skipped check is worse than a broken one.
-def _from_app(*names):
+# (It just raised, on exactly that: `surname` moved out of draft_app.)
+def _from_app(name):
     src = (HERE / "draft_app.py").read_text(encoding="utf-8")
-    seg = src[src.index("_SUFFIXES ="):src.index("def build_rookie_board")]
+    seg = src[src.index("def arc_flag"):src.index("def build_rookie_board")]
     ns: dict = {"pd": pd}
     exec(seg, ns)
-    return [ns[n] for n in names]
+    return ns[name]
 
 
-surname, arc_flag = _from_app("surname", "arc_flag")
+arc_flag = _from_app("arc_flag")
 
 
 # --------------------------------------------------------------------------- the board table

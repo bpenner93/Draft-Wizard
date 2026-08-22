@@ -52,3 +52,20 @@ def norm_name(name, lastfirst: bool = False) -> str:
 def pos_norm(pos) -> str:
     p = str(pos or "").upper().strip()
     return {"PK": "K", "DEF": "DST", "DST": "DST", "D/ST": "DST"}.get(p, p)
+
+
+_NAME_SUFFIX = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def surname(name) -> str:
+    """Last name for a compact label. NOT `name.split()[-1]` -- that renders
+    Marvin Harrison Jr. as "Jr." and Oronde Gadsden II as "II". Roughly one
+    draftable player in twenty carries a generational suffix and there are three
+    different Jr.s inside the top 80, so the naive version is ambiguous as well as
+    wrong. Defenses are named by their team ("SEA DST") and are kept whole."""
+    parts = [x for x in str(name or "").split() if x]
+    if parts and parts[-1].upper() in ("DST", "D/ST", "DEF"):
+        return " ".join(parts)
+    while len(parts) > 1 and parts[-1].lower().strip(".") in _NAME_SUFFIX:
+        parts.pop()
+    return parts[-1] if parts else str(name or "")

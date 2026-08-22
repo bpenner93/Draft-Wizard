@@ -794,7 +794,7 @@ def _bb_replacement(remaining: list[dict], bb_val: dict[str, float],
 
 
 def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
-            n_sims: int = 1200) -> dict:
+            n_sims: int = 1200, seed: int | None = None) -> dict:
     """Recompute the whole wizard state. `drafted_ids` is the ordered list of
     player ids taken so far (overall pick order). Returns a render-ready dict."""
     board = [dict(p) for p in board_in]                 # copy; we annotate
@@ -841,7 +841,13 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
             -12.0, 12.0)
     else:
         adp_bias = None
-    surv, ebest = monte_carlo(remaining, k_before=picks_until, n_sims=n_sims, adp_bias=adp_bias)
+    # ⭐ seeded per PICK, not once: a single constant would give every pick in the
+    # draft the same draw pattern, correlating the survival error across picks
+    # instead of removing it. [seed, overall] keeps each pick independent while
+    # still being reproducible, so a replayed room shows the same survival numbers.
+    _mc_seed = None if seed is None else [int(seed), int(current_overall)]
+    surv, ebest = monte_carlo(remaining, k_before=picks_until, n_sims=n_sims,
+                              adp_bias=adp_bias, seed=_mc_seed)
     surv_by_id = {p["id"]: float(s) for p, s in zip(remaining, surv)}
 
     # best-now VOR per position + cost of waiting
@@ -1147,12 +1153,25 @@ def opponent_pick(remaining: list[dict], cfg: LeagueConfig, counts: dict,
 
 
 def mock_advance(valued_board: list[dict], cfg: LeagueConfig, drafted_ids: list[str], rng,
-                 max_picks: int | None = None) -> list[str]:
+                 max_picks: int | None = None, seed: int | None = None) -> list[str]:
     """Auto-draft for every team that isn't YOU until it's your pick (or the draft
     ends). Returns the extended drafted-id list. Pass a board from prep_valued().
 
     `max_picks` caps how many opponent picks are made in one call, so the UI can
-    step the room forward one pick at a time instead of jumping to your turn."""
+    step the room forward one pick at a time instead of jumping to your turn.
+
+    ⭐ `seed` makes the ROOM REPLAYABLE, and it cannot be done by seeding one
+    stream. `opponent_pick` draws one normal PER REMAINING PLAYER, so the number
+    of draws consumed at each pick depends on how many players are left -- change
+    one of your own picks and every subsequent opponent reads a different point
+    in the stream, which desynchronises the whole room for a reason that has
+    nothing to do with your decision. Seeding PER PICK (`[seed, overall]`) gives
+    the property you actually want: seat N at pick M behaves the same way for a
+    given seed, so making the same picks reproduces the draft exactly, and
+    deviating changes the room only where your deviation actually reaches.
+
+    `rng` stays positional and is still used when `seed` is None, so draft_tune
+    and bestball_duel are unaffected."""
     by_id = {p["id"]: p for p in valued_board}
     drafted = list(drafted_ids)
     total = cfg.teams * cfg.total_rounds()
@@ -1170,7 +1189,8 @@ def mock_advance(valued_board: list[dict], cfg: LeagueConfig, drafted_ids: list[
         rem = [p for p in valued_board if p["id"] not in taken]
         if not rem:
             break
-        drafted.append(opponent_pick(rem, cfg, counts, rng, rl)["id"])
+        _r = np.random.default_rng([int(seed), overall]) if seed is not None else rng
+        drafted.append(opponent_pick(rem, cfg, counts, _r, rl)["id"])
         made += 1
     return drafted
 
