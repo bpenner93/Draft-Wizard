@@ -386,6 +386,82 @@ def check_app(league_id: str | None = None):
                 ok(f"practice auto-draft finished at {n} picks")
 
 
+# --------------------------------------------------------------------------- matching
+def check_matching(players):
+    """Can we recognise the picks Sleeper will send us?
+
+    An unmatched pick is NOT a crash: sleeper_sync parks a `__off_{n}` placeholder
+    so pick numbers stay aligned. The damage is that the player stays on OUR board
+    as available -- so you can be recommended someone who was taken 40 picks ago.
+
+    ⭐ Two real misses found 2026-08-21:
+      * DEFENSES -- Sleeper identifies them by TEAM CODE (player_id "SEA",
+        first_name "Seattle", position "DEF"); our board says "SEA DST", so the
+        name join matched 0/32. In a league that starts a DEF that is 12 picks.
+      * ACCENTS -- Sleeper writes "Audric Estime", our board has "Audric Estimé",
+        and norm_name does not decompose diacritics."""
+    head("SLEEPER NAME MATCHING")
+    import unicodedata
+    import urllib.request
+    from draft_names import norm_name, pos_norm
+    try:
+        req = urllib.request.Request("https://api.sleeper.app/v1/players/nfl",
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        sp = json.load(urllib.request.urlopen(req, timeout=120))
+    except Exception as e:
+        return warn(f"could not fetch Sleeper's player DB ({e}) — matching unverified")
+
+    def fold(x):
+        return "".join(c for c in unicodedata.normalize("NFKD", norm_name(x))
+                       if not unicodedata.combining(c))
+    TA = {"LAR": "LA", "STL": "LA", "SD": "LAC", "OAK": "LV", "LVR": "LV",
+          "WSH": "WAS", "JAC": "JAX", "ARZ": "ARI", "AZ": "ARI", "GNB": "GB",
+          "KAN": "KC", "NWE": "NE", "NOR": "NO", "SFO": "SF", "TAM": "TB"}
+
+    def tk(t):
+        t = str(t or "").upper().strip()
+        return TA.get(t, t)
+
+    km = {(norm_name(x["name"]), x["pos"]): x["id"] for x in players}
+    fm = {}
+    for x in players:
+        fm.setdefault((fold(x["name"]), x["pos"]), x["id"])
+    dm = {tk(x.get("team")): x["id"] for x in players if x["pos"] == "DST"}
+
+    # every defense must resolve -- this is the one that was silently 0/32
+    nfl32 = ["SEA", "DEN", "HOU", "LAR", "MIN", "NE", "DET", "PIT", "PHI", "LAC",
+             "SF", "GB", "JAX", "BUF", "CLE", "KC", "BAL", "DAL", "CIN", "NYG",
+             "ARI", "CAR", "IND", "LV", "MIA", "NYJ", "TB", "WAS", "ATL", "CHI",
+             "NO", "TEN"]
+    nod = [t for t in nfl32 if not dm.get(tk(t))]
+    (bad if nod else ok)(f"defenses resolving by team code: {32-len(nod)}/32"
+                         + (f"  MISSING {nod}" if nod else ""))
+
+    tot = 0
+    miss = []
+    for pid, x in sp.items():
+        if not x.get("team"):
+            continue                       # retired/FA: Sleeper still ranks Brady
+        pos = pos_norm(x.get("position"))
+        if pos not in ("QB", "RB", "WR", "TE", "K", "DST"):
+            continue
+        sr = x.get("search_rank")
+        if sr is None or sr > 320:
+            continue
+        nm = f"{x.get('first_name','')} {x.get('last_name','')}".strip()
+        tot += 1
+        hit = (dm.get(tk(x.get("team"))) if pos == "DST"
+               else (km.get((norm_name(nm), pos)) or fm.get((fold(nm), pos))))
+        if not hit:
+            miss.append((sr, nm, pos, x.get("team")))
+    rate = (tot - len(miss)) / max(tot, 1)
+    (ok if rate >= 0.92 else bad)(
+        f"draftable Sleeper players recognised: {tot-len(miss)}/{tot} ({rate*100:.0f}%)")
+    if miss:
+        print("      unmatched (become placeholders; pick numbers stay aligned): "
+              + ", ".join(f"{n}" for _, n, _, _ in sorted(miss)[:8]))
+
+
 # --------------------------------------------------------------------------- live league
 def check_league(league_id: str):
     head(f"LIVE LEAGUE {league_id}")
@@ -544,6 +620,7 @@ def main():
     ]
     drafted = check_engine(players, cfgs[:1] if a.quick else cfgs)
     check_visuals(players, cfgs[0][1], drafted)
+    check_matching(players)
     for lid in a.league:
         check_league(lid)
     if not a.quick:

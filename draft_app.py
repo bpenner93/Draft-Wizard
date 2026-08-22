@@ -162,6 +162,38 @@ by_id = {p["id"]: p for p in working}
 key_map = {(norm_name(p["name"]), p["pos"]): p["id"] for p in working}   # for Sleeper/manual matching
 
 
+def _fold(s: str) -> str:
+    """norm_name + accent stripping. Sleeper writes `Audric Estime`, our board has
+    `Audric Estimé`, and norm_name does not decompose diacritics -- so the exact
+    key misses and the pick becomes a placeholder while he stays on the board as
+    available. Used only as a FALLBACK, so it cannot change an exact match."""
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", norm_name(s))
+                   if not unicodedata.combining(c))
+
+
+# Sleeper identifies a defense by TEAM CODE, not by a name: player_id "SEA",
+# first_name "Seattle", last_name "Seahawks", position "DEF", team "SEA". Our
+# board calls it "SEA DST", so the name join can never match and every defense
+# drafted would land as a placeholder -- in a league that STARTS a DEF, that is
+# 12 defenses left showing as available. Match those on the team code instead.
+# ⚠ codes drift: Sleeper says LAR for the Rams, our board says LA.
+_TEAM_ALIAS = {"LAR": "LA", "STL": "LA", "SD": "LAC", "OAK": "LV", "LVR": "LV",
+               "WSH": "WAS", "JAC": "JAX", "ARZ": "ARI", "AZ": "ARI", "GNB": "GB",
+               "KAN": "KC", "NWE": "NE", "NOR": "NO", "SFO": "SF", "TAM": "TB"}
+
+
+def _team_key(t) -> str:
+    t = str(t or "").upper().strip()
+    return _TEAM_ALIAS.get(t, t)
+
+
+fold_map = {}
+for _p in working:                       # first writer wins, so exact stays exact
+    fold_map.setdefault((_fold(_p["name"]), _p["pos"]), _p["id"])
+dst_map = {_team_key(_p.get("team")): _p["id"] for _p in working if _p["pos"] == "DST"}
+
+
 # --------------------------------------------------------------------------- helpers
 def draft_ids(ids):
     for pid in ids:
@@ -194,7 +226,11 @@ def sleeper_sync(draft_id: str = None, league_id: str = None):
         m = pk.get("metadata") or {}
         nm = f"{m.get('first_name','')} {m.get('last_name','')}".strip()
         pos = pos_norm(m.get("position"))
-        pid = key_map.get((norm_name(nm), pos))
+        if pos == "DST":                              # matched by team, never by name
+            pid = dst_map.get(_team_key(m.get("team") or pk.get("player_id")))
+        else:
+            pid = (key_map.get((norm_name(nm), pos))
+                   or fold_map.get((_fold(nm), pos)))
         if pid:
             drafted.append(pid); matched.append(pid)
         else:
