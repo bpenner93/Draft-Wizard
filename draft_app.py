@@ -653,25 +653,6 @@ with main:
                        f"(#{res['my_next_pick']}). ⏳ **{seat_name(res['on_clock'])}** is on the "
                        f"clock — tap who they take below.")
 
-        # Quick-pick chips. A tap always books the pick for whoever is ON THE CLOCK,
-        # and the two cases want DIFFERENT shortlists:
-        #   on the clock  -> your best options, i.e. the decision order
-        #   off the clock -> who the room is most likely to take next, i.e. ADP
-        # (the old code used raw VOR for both, which offered a kicker in round 7)
-        if on_clock_me:
-            shortlist, chip_note = res["ranked"][:5], "your pick"
-        else:
-            shortlist = sorted([p for p in res["best_available"] if p.get("adp")],
-                               key=lambda x: x["adp"])[:5]
-            chip_note = f"who {seat_name(res['on_clock'])} took — likeliest by ADP"
-        st.markdown(f'<div class="dw-h">Quick mark — {chip_note}</div>',
-                    unsafe_allow_html=True)
-        chips = st.columns(len(shortlist) or 1)
-        for i, a in enumerate(shortlist):
-            if chips[i].button(a["name"].split()[-1], key=f"chip_{i}", width="stretch",
-                               help=f"{a['name']} · {a['pos']}{a.get('posrank','')} "
-                                    f"· {a.get('team') or ''}"):
-                do_pick(a["id"]); st.rerun()
 
 with side:
     st.markdown('<div class="dw-h">🕐 On deck — who picks before you</div>',
@@ -679,6 +660,31 @@ with side:
     st.markdown(on_deck_html(cfg, sstate, res["current_overall"], res["my_next_pick"],
                              res["opponents"].get("seat_need"), max_rows=13),
                 unsafe_allow_html=True)
+
+# --------------------------------------------------------------------------- quick mark
+# A tap always books the pick for whoever is ON THE CLOCK, and the two cases want
+# DIFFERENT shortlists:
+#   on the clock  -> your best options, i.e. the decision order
+#   off the clock -> who the room is most likely to take next, i.e. ADP
+# (the original used raw VOR for both, which offered a kicker in round 7)
+# ⚠ full width, NOT inside the recommendation column: at a 958px window that
+# column is ~277px and five stretched buttons ellipsised every surname to "R..".
+if rec and not done:
+    if on_clock_me:
+        shortlist, chip_note = res["ranked"][:5], "your pick"
+    else:
+        shortlist = sorted([p for p in res["best_available"] if p.get("adp")],
+                           key=lambda x: x["adp"])[:5]
+        chip_note = f"who {seat_name(res['on_clock'])} took — likeliest by ADP"
+    st.markdown(f'<div class="dw-h">Quick mark — {chip_note}</div>',
+                unsafe_allow_html=True)
+    chips = st.columns(len(shortlist) or 1)
+    for i, a in enumerate(shortlist):
+        if chips[i].button(f"{a['name'].split()[-1]} · {a['pos']}", key=f"chip_{i}",
+                           width="stretch",
+                           help=f"{a['name']} · {a['pos']}{a.get('posrank','')} "
+                                f"· {a.get('team') or ''}"):
+            do_pick(a["id"]); st.rerun()
 
 st.divider()
 
