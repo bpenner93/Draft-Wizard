@@ -110,6 +110,10 @@ def league_state(league_id: str | None = None, draft_id: str | None = None) -> d
         "teams": settings.get("teams"), "rounds": settings.get("rounds"),
         "my_slot": order.get(SLEEPER_USER_ID), "my_roster": my_roster,
         "slot_to_roster": slot_to_roster, "roster_team": roster_team,
+        # roster -> USER. Tendencies are keyed on user_id, never on seat or team
+        # name: draft slots are redrawn every season and people rename their
+        # teams, so anything else hands last year's habits to the wrong person.
+        "roster_owner": roster_owner,
         "traded": tmap, "picks": sorted(picks, key=lambda x: x.get("pick_no", 0)),
     }
 

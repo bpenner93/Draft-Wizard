@@ -218,7 +218,7 @@ def draft_board_html(cfg, state, drafted, by_id, rounds_window: int | None = Non
 # --------------------------------------------------------------------------- on deck
 def on_deck_html(cfg, state, current_overall: int, my_next: int | None,
                  seat_need: list[dict] | None, max_rows: int = 14,
-                 complete: bool = False) -> str:
+                 complete: bool = False, tendencies: dict | None = None) -> str:
     """The queue between now and your next pick: every seat that picks before you,
     in order, with the position that seat most needs.
 
@@ -262,17 +262,28 @@ def on_deck_html(cfg, state, current_overall: int, my_next: int | None,
         # the row instead of ellipsising -- at a 196px column that turned every
         # opponent into "F…". The overall pick number rides with the label
         # rather than taking a column of its own.
+        # what this manager has actually done in past drafts, for THIS round only
+        note = None
+        if tendencies and not is_me:
+            note = tendency_note(slot_manager(state, s, tendencies),
+                                 tendencies.get("league_median_first_round"), rnd)
+        name_cell = (
+            f'<div style="flex:1 1 auto;min-width:0">'
+            f'<div style="color:{col};font-weight:{600 if (live or is_me) else 400};'
+            f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap"'
+            f' title="{_esc(nm)}">{_esc(nm)}{" ⇄" if traded else ""}</div>'
+            + (f'<div style="color:#7c8aa5;font-size:9.5px;overflow:hidden;'
+               f'text-overflow:ellipsis;white-space:nowrap">↳ {_esc(note)}</div>'
+               if note else "")
+            + '</div>')
         rows += (
-            f'<div style="display:flex;align-items:baseline;gap:7px;padding:5px 8px;'
+            f'<div style="display:flex;align-items:center;gap:7px;padding:5px 8px;'
             f'background:{bg};border-left:3px solid {GOLD if live else (MINE if is_me else LINE)};'
             f'border-bottom:1px solid {LINE};font-size:12px">'
             f'<span style="color:{MUTE};flex:0 0 auto;font-variant-numeric:tabular-nums">'
             f'{pick_label(cfg, p)}'
             f'<span style="font-size:9px;opacity:.7"> #{p}</span></span>'
-            f'<span style="color:{col};flex:1 1 auto;min-width:0;'
-            f'font-weight:{600 if (live or is_me) else 400};'
-            f'overflow:hidden;text-overflow:ellipsis;white-space:nowrap"'
-            f' title="{_esc(nm)}">{_esc(nm)}{" ⇄" if traded else ""}</span>'
+            + name_cell +
             f'<span style="color:{GOLD if (live or is_me) else MUTE};font-size:10px;'
             f'flex:0 0 auto;white-space:nowrap">{_esc(tag)}</span></div>')
         n += 1
@@ -402,7 +413,7 @@ POS_ORDER = ("QB", "RB", "WR", "TE", "K", "DST")
 
 
 def team_rosters_html(cfg, state, drafted, by_id, starters: dict | None = None,
-                      only_slot: int | None = None) -> str:
+                      only_slot: int | None = None, tendencies: dict | None = None) -> str:
     """Every seat's ACTUAL ROSTER, side by side — the "let me see people's teams"
     view. The grid answers *when* a player went; this answers *who has what*.
 
@@ -432,6 +443,7 @@ def team_rosters_html(cfg, state, drafted, by_id, starters: dict | None = None,
     seats = [only_slot] if only_slot else range(1, teams + 1)
     for s in seats:
         me = (s == my_slot)
+        _mgr = slot_manager(state, s, tendencies)
         picks = rosters.get(s, [])
         rows = ""
         for pos in POS_ORDER:
@@ -467,8 +479,63 @@ def team_rosters_html(cfg, state, drafted, by_id, starters: dict | None = None,
             f'text-overflow:ellipsis">{"★ " if me else ""}{slot_team(cfg, state, s)}'
             f'<span style="color:{"#bfdbfe" if me else MUTE};font-weight:400;font-size:10px">'
             f' · seat {s} · {len(picks)} picks</span></div>'
-            f'<table style="width:100%;border-collapse:collapse;padding:4px">'
+            # the manager's standing habits, from this league's own past drafts
+            + (f'<div style="background:{PANEL};color:#7c8aa5;font-size:9.5px;'
+               f'padding:2px 8px;border-bottom:1px solid {LINE}">'
+               f'{_esc("; ".join((_mgr.get("notes") or [])[:2]))}</div>'
+               if (_mgr and _mgr.get("notes")) else "")
+            + f'<table style="width:100%;border-collapse:collapse;padding:4px">'
             f'{rows}</table></div>')
 
     return (f'<div style="display:flex;flex-wrap:wrap;gap:8px;'
             f'font-family:system-ui,-apple-system,sans-serif">{cards}</div>')
+
+
+# --------------------------------------------------------------------------- tendencies
+def tendency_note(mgr: dict, room_median: dict, rnd: int) -> str | None:
+    """ONE short phrase about this manager, chosen for the round being drafted.
+
+    A profile has several facts and almost all of them are irrelevant at any given
+    moment -- "opens WR" tells you nothing in round 9, and "waits on TE until 13"
+    tells you nothing in round 1. Showing the whole profile on every row would
+    turn the on-deck panel into a wall you stop reading, which is worse than
+    showing nothing. So: pick the one fact that bears on THIS round, or stay
+    quiet.
+
+    Only DEVIATIONS from the room count. "Takes a QB around round 8" is not a
+    tendency, it is what everybody does."""
+    if not mgr:
+        return None
+    rnd = int(rnd or 1)
+    if rnd <= 2:
+        pct = mgr.get("opens_with_pct") or 0
+        if mgr.get("opens_with") and pct >= 60:
+            return f"opens {mgr['opens_with']} {pct}%"
+    best = None
+    for pos, mine in (mgr.get("median_first_round") or {}).items():
+        room = (room_median or {}).get(pos)
+        if room is None or pos in ("K", "DST"):
+            continue
+        dev = float(mine) - float(room)
+        if abs(dev) < 2:
+            continue
+        lo, hi = min(float(mine), float(room)), max(float(mine), float(room))
+        if not (lo - 1 <= rnd <= hi + 1):        # not his window yet, or long past
+            continue
+        if best is None or abs(dev) > best[0]:
+            best = (abs(dev), f"{'early' if dev < 0 else 'waits'} {pos} · rd{float(mine):g}")
+    return best[1] if best else None
+
+
+def slot_manager(state, slot: int, tend: dict | None) -> dict | None:
+    """The tendency profile for whoever holds this SEAT, via roster -> user_id."""
+    if not state or not tend:
+        return None
+    rid = (state.get("slot_to_roster") or {}).get(slot)
+    uid = (state.get("roster_owner") or {}).get(rid)
+    if not uid:
+        return None
+    for m in tend.get("managers", []):
+        if str(m.get("user_id")) == str(uid):
+            return m
+    return None

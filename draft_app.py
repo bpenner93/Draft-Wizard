@@ -108,6 +108,20 @@ def get_board():
     return load_board()
 
 
+@st.cache_data(show_spinner=False)
+def get_tendencies():
+    """Manager habits from this league's OWN past drafts, built by
+    manager_tendencies.py. Absent is fine and common -- a first-year league has no
+    history -- so every consumer treats None as "say nothing"."""
+    p = Path(__file__).parent / "data" / "manager_tendencies.json"
+    if not p.exists():
+        return None
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return None
+
+
 # ⚠ NOT `name.split()[-1]`. Roughly one in twenty draftable players carries a
 # generational suffix, so that renders Marvin Harrison Jr. as a chip labelled
 # "Jr. · WR" -- and there are three different Jr.s inside the top 80, so the
@@ -159,6 +173,7 @@ def revalue_rookies(rb, superflex):
 
 
 board = get_board()
+TEND = get_tendencies()
 ss = st.session_state
 ss.setdefault("drafted", [])          # ordered list of drafted player ids
 # The practice room's seed. Generated once per session so it is a number you can
@@ -756,13 +771,28 @@ with main:
 with side:
     # nobody is on the clock once the last pick is in -- the panel used to show
     # "15.12 ON THE CLOCK" on a completed draft
+    # tendencies only mean something once seats are tied to real Sleeper managers
+    _tend = TEND if (sstate and TEND
+                     and str(TEND.get("league_id")) == str(sstate.get("league_id"))) else None
     if not done:
         st.markdown('<div class="dw-h">🕐 On deck — who picks before you</div>',
                     unsafe_allow_html=True)
         st.markdown(on_deck_html(cfg, sstate, res["current_overall"], res["my_next_pick"],
                                  res["opponents"].get("seat_need"), max_rows=13,
-                                 complete=done),
+                                 complete=done, tendencies=_tend),
                     unsafe_allow_html=True)
+        if _tend:
+            _fc = _tend.get("format_changed_from") or []
+            st.caption(
+                f"↳ lines are what that manager has actually done across "
+                f"{len(_tend.get('seasons_used') or [])} past drafts in **this** league, "
+                f"picked for the round you're in."
+                + (f" ⚠ **{', '.join(_fc)} were "
+                   f"{'1QB' if _tend['format_now'].get('superflex') else 'SUPERFLEX'} and "
+                   f"{_tend.get('season_now')} is "
+                   f"{'SUPERFLEX' if _tend['format_now'].get('superflex') else '1QB'}** — "
+                   f"QB timing from those years is excluded, and expect this room to "
+                   f"reach on QBs out of habit." if _fc else ""))
 
 # --------------------------------------------------------------------------- quick mark
 # A tap always books the pick for whoever is ON THE CLOCK, and the two cases want
@@ -1061,7 +1091,10 @@ with t_board:
 
 with t_teams:
     st.markdown('<div class="dw-h">Everyone&rsquo;s team</div>', unsafe_allow_html=True)
-    st.markdown(team_rosters_html(cfg, sstate, ss.drafted, by_id, cfg.starters),
+    _tend_t = TEND if (sstate and TEND
+                       and str(TEND.get("league_id")) == str(sstate.get("league_id"))) else None
+    st.markdown(team_rosters_html(cfg, sstate, ss.drafted, by_id, cfg.starters,
+                                  tendencies=_tend_t),
                 unsafe_allow_html=True)
     st.caption("Counts are against this league's STARTING requirement — "
                "`RB 3/2` means three rostered for two slots, `DST 0/1` is a hole. "
