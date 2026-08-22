@@ -133,6 +133,15 @@ def check_engine(players, cfgs):
         if "ranked" not in r:
             bad(f"{label}: analyze() no longer returns `ranked` — the board would fall "
                 f"back to raw VOR order")
+        # ⭐ every column the UI renders must survive _slim()'s FIXED key set. A
+        # field can be present on all 680 board players and still reach the screen
+        # as None -- `bye` shipped that way and printed "None" on every row.
+        _ba = r["best_available"][:40]
+        for _col in ("name", "pos", "posrank", "team", "bye", "vor", "tier", "adp",
+                     "survival", "rec_score", "cost_of_waiting", "arc", "decl"):
+            if not any(x.get(_col) is not None for x in _ba):
+                bad(f"{label}: `{_col}` is None on every row of best_available — "
+                    f"that column renders blank. Check _slim() in draft_engine.")
 
     # a full mock has to terminate and produce legal rosters. Run it on a league
     # that STARTS a kicker when one is available -- the K/DST late-round logic is

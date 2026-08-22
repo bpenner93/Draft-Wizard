@@ -50,7 +50,11 @@ ba = r["best_available"][:40]
 # these are exactly the columns that were blank-on-phone before they were baked in
 print("ARC=%d/%d" % (sum(1 for x in ba if x.get("arc") is not None), len(ba)))
 print("DECL=%d/%d" % (sum(1 for x in ba if x.get("decl") is not None), len(ba)))
-print("BYE=%d/%d" % (sum(1 for x in board[:200] if x.get("bye")), 200))
+# ⚠ read these off `best_available`, NOT off `board`. _slim() copies a FIXED key
+# set, so a column can be populated on every one of the 680 board players and
+# still arrive at the UI as None -- which is exactly what `bye` did. Checking the
+# board tests the input; the UI is the consumer.
+print("BYE=%d/%d" % (sum(1 for x in ba if x.get("bye") is not None), len(ba)))
 print("ADP=%d/%d" % (sum(1 for x in ba if x.get("adp") is not None), len(ba)))
 print("SURV=%d/%d" % (sum(1 for x in ba if x.get("survival") is not None), len(ba)))
 

@@ -1208,7 +1208,12 @@ def _slim(p: dict, full: bool = False) -> dict:
            "posrank": p.get("_posrank"), "vor": p.get("_vor"), "pts": p.get("_pts"),
            "tier": p.get("_tier"), "adp": p.get("adp"), "rookie": p.get("rookie"),
            # career-arc comps, baked into draft_board.json by export_draft_board
-           "arc": p.get("arc"), "decl": p.get("decl")}
+           "arc": p.get("arc"), "decl": p.get("decl"),
+           # ⚠ _slim uses a FIXED key set, so a field can be present on all 680
+           # board players and STILL reach the UI as None. `bye` was added as a
+           # board column and rendered "None" on every row of the live app until
+           # it was listed here. Anything the app displays must be in this dict.
+           "bye": p.get("bye")}
     if full:
         out.update({"survival": p.get("_surv"), "cost_of_waiting": p.get("_cow"),
                     "rec_score": p.get("_rec_score"), "ecr": p.get("ecr"), "clay": p.get("clay"),
