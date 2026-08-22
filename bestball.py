@@ -110,9 +110,58 @@ DEFAULT_CV = 0.614
 # E[max(0, x - B)] felt like "testing the consumer", but the real consumer is the
 # comparison BETWEEN players, and a uniformly better-calibrated input can still
 # order them worse.
-# ⚠ Do not re-ship this on the strength of the +7.5% alone. If it is revisited,
-# the thing to fix is the RELATIVE effect -- e.g. renormalising so the gradient
-# does not shift value across rank tiers on net.
+# ⚠ Do not re-ship this on the strength of the +7.5% alone.
+#
+# ⛔ SIX ARMS HAVE NOW BEEN TRIED. None wins. Same duel, 24 paired leagues/
+# season (v0 reproduces the number above exactly, so the arms are comparable):
+#       v0  shipped table, RB/WR/TE, full-sample medians   -113.9  t -3.05
+#       v1  + drop TE, + the OOS-VALIDATED train fit       -116.8  t -3.44
+#       v2  + renormalise to preserve mean CV              -100.3  t -2.82
+#       v3  zeros-clean refit (below), RB+WR, raw          -141.6  t -4.88
+#       v3n + renormalised                                 -123.4  t -3.55
+#       v3w WR ONLY, zeros-clean, renormalised              -54.2  t -1.47
+# The best arm merely stops losing significantly. Sign consistent both seasons
+# in every arm. Mix gap <=0.6 players throughout, so none of this is the
+# position-mix confound that ruined bestball_duel.py.
+#
+# ⭐ WHY -- THE BIAS IS THE WHOLE STORY, AND MAE HID IT. cv_ci-style MAE says
+# rank CV is better by 7.5-8%. SIGNED bias by tier says the opposite where it
+# counts. Predicted vs realised E[max(0, week - B)] at B=16, OOS, ex-ante
+# population (+ = OVER-values):
+#       RB top12   flat +29%   rank  +6%
+#       RB 13-24   flat +45%   rank +17%
+#       RB 25-48   flat +18%   rank +39%
+#       RB   49+   flat  -1%   rank +87%     <-- the entire problem
+# MAE still improves because the top tiers carry far more absolute value
+# (3.46 vs 0.53 pts), so halving a +29% error on a stud outweighs creating a
+# +87% error on a scrub. The board does not care about aggregate MAE -- it cares
+# about the COMPARISON, and that is exactly what this breaks.
+#
+# ⭐⛔ ROOT CAUSE OF THE STEEPNESS: ZEROS. test_rank_dependent_cv.py reads
+# player_history.db weekly_snapshots, which carries 0.0 rows for weeks a player
+# did not produce (22.9% of all rows). CV was computed over them. This module
+# gates availability SEPARATELY in sample_weekly, so those zeros are
+# DOUBLE-COUNTED as dispersion -- and they land hardest on deep players, who
+# miss the most games. Refitting on produced weeks only:
+#       WR spread top12->49+   .257 -> .149   (42% of the gradient was availability)
+#       RB 49+                 1.080 -> .862
+# and the bias at B=16 improves to RB 49+ +42% (from +87%) and WR 49+ +7% (from
+# +33%). Genuinely better -- and STILL loses the duel. That is v3 above.
+#
+# ✅ THE FLAT CONSTANTS ARE NOT AFFECTED. fit_weekly_cv.py's source is 72.4%
+# zero rows, but its relevance filter removes almost all of them: inside the
+# population that actually set WEEKLY_CV only 2.5% of rows are 0.0, and
+# refitting on produced weeks moves QB -.001 / RB -.009 / WR -.033 / TE -.059.
+# The zeros problem is specific to a GRADIENT, whose deep bucket is deliberately
+# populated with the very players the relevance filter was excluding.
+# (TE -.059 is the one non-trivial cell and has not been duelled on its own.)
+#
+# ⛔ TREAT THIS LEVER AS CLOSED AT THE CV LEVEL. Six arms, two of them correctly
+# specified, all negative. If it is ever revisited the target is the FUNCTIONAL,
+# not the numbers: the gamma is still too fat in the far tail (RB 49+ empirical
+# P(week>30) is 0.8% against 2.4% implied), so a saturating tail, an empirical
+# marginal, or valuing a pick by win-probability rather than summed option value
+# are the live ideas. Re-tuning CV constants is not.
 #
 # ---- the fit itself, which stands on its own merits ----------------------
 # `test_rank_dependent_cv.py` on 12 seasons (2014-2025, weekly_snapshots; PPR

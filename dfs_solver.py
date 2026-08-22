@@ -1414,7 +1414,13 @@ def lineup_metrics(cand_pay, cand_ranks, cand_scores, cand_bin, pool, entry_fee,
     ev / roi           expected payout per entry, and ROI on the entry fee (SIM)
     p_cash             fraction of sims with a non-zero payout
     p_top1 / p_win     fraction finishing in the top 1% / winning outright
-    med / p90          median and 90th-percentile lineup score
+    med / p10 / p90    median, bad-day and good-day lineup score
+    upside/downside    how far the good and bad days run either side of the median
+    right_skew         Bowley quantile skew in [-1,+1]. POSITIVE = the distribution leans
+                       toward high scores. This, not `spread`, is what is worth paying for:
+                       width is symmetric and buys a fat LEFT tail for every unit of right
+                       tail. Two lineups with the same ev are not the same lineup.
+    spread / sd        raw width, kept for reference and for the cash floor question.
     own                summed projected ownership (cumulative %)
     dupes              rough expected duplicate entries in the field
     """
@@ -1425,6 +1431,27 @@ def lineup_metrics(cand_pay, cand_ranks, cand_scores, cand_bin, pool, entry_fee,
     p_win = (cand_ranks <= 1).mean(axis=0) * 100.0
     med = np.median(cand_scores, axis=0)
     p90 = np.percentile(cand_scores, 90, axis=0)
+    # ⭐ SKEW, NOT WIDTH. The thing worth paying for is a distribution that leans HIGH, not
+    # one that is merely wide -- width is symmetric, so it buys a fat left tail (dead money
+    # in every format) for every unit of right tail it delivers. What a top-heavy payout
+    # rewards is ASYMMETRY: reach above the median without a matching hole below it.
+    #   upside   = p90 - med   how far the good days run above the middle
+    #   downside = med - p10   how far the bad days run below it
+    #   skew     = (upside - downside) / spread   Bowley quantile skew, in [-1, +1];
+    #              positive means the distribution leans toward the high scores.
+    # Mechanism: 9 summed lognormals tend back toward symmetry by CLT, so lineup-level right
+    # skew comes from CORRELATION -- a stack's members boom together, which stretches the
+    # right tail specifically. That makes skew the number that should track stacking, and
+    # `spread` alone the one that does not distinguish a stack from a volatile mess.
+    p10 = np.percentile(cand_scores, 10, axis=0)
+    spread = p90 - p10
+    upside = p90 - med
+    downside = med - p10
+    # NB named `right_skew`, not `skew`: a column called `skew` shadows
+    # DataFrame.skew, so `metrics.skew` silently returns the METHOD and any
+    # attribute-style access downstream breaks in a confusing way.
+    right_skew = np.divide(upside - downside, np.maximum(spread, 1e-9))
+    sd = cand_scores.std(axis=0)
 
     own = pool["est_ownership"].to_numpy(dtype=float)
     sal = pool["salary"].to_numpy(dtype=float)
@@ -1460,7 +1487,9 @@ def lineup_metrics(cand_pay, cand_ranks, cand_scores, cand_bin, pool, entry_fee,
 
     return pd.DataFrame({"ev": ev, "roi": roi, "ev_dup": ev_dup, "roi_dup": roi_dup,
                          "dupes": dupes, "p_cash": p_cash, "p_top1": p_top1,
-                         "p_win": p_win, "med": med, "p90": p90, "own": cum_own,
+                         "p_win": p_win, "med": med, "p10": p10, "p90": p90,
+                         "upside": upside, "downside": downside, "right_skew": right_skew,
+                         "spread": spread, "sd": sd, "own": cum_own,
                          "salary": salary, "dup_risk": dup_rank})
 
 
