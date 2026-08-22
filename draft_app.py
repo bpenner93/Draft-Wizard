@@ -30,8 +30,8 @@ from draft_engine import (load_board, LeagueConfig, analyze, plan_draft,   # noq
                           ARCHETYPES, ARCHETYPE_LABEL, prep_valued, mock_advance,
                           team_on_clock, grade_draft)
 from draft_board import (draft_board_html, on_deck_html, run_strip_html,     # noqa: E402
-                         roster_matrix_html, status_bar_html, slot_team,
-                         pick_label, POS_BG)
+                         roster_matrix_html, team_rosters_html, status_bar_html,
+                         slot_team, pick_label, POS_BG)
 from draft_names import norm_name, pos_norm                          # noqa: E402
 
 # quick-league presets (the main axes; roster stays standard, your slot is separate)
@@ -730,6 +730,18 @@ if True:
                                    "player left, ignoring your roster. Market ADP = the "
                                    "order the room is likely to take them.")
     _which = _ORDERS[_pick_order]
+    # Position filter. Only offer positions this league actually uses -- a K chip
+    # in a league with no kicker slot is a control that can only mislead. FLEX is
+    # a convenience for RB/WR/TE together, which is the filter you actually want
+    # when you are deciding who fills a flex spot.
+    _used = [q for q in ("QB", "RB", "WR", "TE")
+             if cfg.starters.get(q) or cfg.starters.get("FLEX") or cfg.superflex]
+    _used += [q for q in ("K", "DST") if cfg.starters.get(q)]
+    _opts = _used[:4] + (["FLEX"] if cfg.starters.get("FLEX") else []) + _used[4:]
+    _posf = bh[1].pills("Positions", _opts, selection_mode="multi",
+                        label_visibility="collapsed", key="posfilter",
+                        help="Filter the board. Nothing selected = every position. "
+                             "FLEX = RB/WR/TE together.")
     # On a phone the table is ~343px wide. 13 columns there is a horizontal scroll
     # with the player's NAME scrolled off, which makes the numbers unreadable --
     # so Player is pinned (below) and this drops to the six columns you actually
@@ -743,6 +755,19 @@ if True:
                  + [p for p in res["best_available"] if not p.get("adp")])
     else:
         _pool = res[_which]
+    if _posf:
+        _want = set()
+        for _x in _posf:
+            _want |= {"RB", "WR", "TE"} if _x == "FLEX" else {_x}
+        # build from the PER-POSITION windows, not by filtering the top-60 --
+        # see the note on `by_pos` in draft_engine.analyze
+        _pool = [p for pos in _want for p in res["by_pos"].get(pos, [])]
+        if _which == "market":
+            _pool.sort(key=lambda x: (x.get("adp") is None, x.get("adp") or 0))
+        elif _which == "best_available":
+            _pool.sort(key=lambda x: -(x.get("vor") or 0))
+        else:
+            _pool.sort(key=lambda x: -(x.get("rec_score") or 0))
     rows = []
     _cur = res["current_overall"]
     for p in _pool[:60]:
@@ -780,6 +805,9 @@ if True:
             "Arc": arc_flag(p.get("arc")),
             "Decl%": p.get("decl"),
         })
+    if not rows:
+        st.info(f"No {', '.join(_posf)} left on the board.")
+        st.stop()
     df = pd.DataFrame(rows)
     # ⚠ a column with ANY None becomes object dtype, and Styler's `na_rep` only
     # replaces NaN -- so a player with no ADP rendered the literal string "None"
@@ -833,7 +861,8 @@ if True:
     _sel = st.dataframe(sty, width="stretch", hide_index=True, height=620,
                         column_config=_colcfg,
                         selection_mode="single-row", on_select="rerun",
-                        key=f"ba_{len(ss.drafted)}_{_which}_{int(_compact)}")
+                        key=f"ba_{len(ss.drafted)}_{_which}_{int(_compact)}"
+                            f"_{'-'.join(sorted(_posf or []))}")
     _rows = list(getattr(getattr(_sel, "selection", None), "rows", None) or [])
     if _rows and not done:
         do_pick(_pool[_rows[0]]["id"])
@@ -929,6 +958,13 @@ with t_board:
                + (" · ⇄ = traded pick, now the tagged team's" if sstate else ""))
 
 with t_teams:
+    st.markdown('<div class="dw-h">Everyone&rsquo;s team</div>', unsafe_allow_html=True)
+    st.markdown(team_rosters_html(cfg, sstate, ss.drafted, by_id, cfg.starters),
+                unsafe_allow_html=True)
+    st.caption("Counts are against this league's STARTING requirement — "
+               "`RB 3/2` means three rostered for two slots, `DST 0/1` is a hole. "
+               "The pick each player went at is beside his name.")
+    st.divider()
     st.markdown('<div class="dw-h">Roster shape — every seat</div>', unsafe_allow_html=True)
     st.markdown(roster_matrix_html(cfg, sstate, ss.drafted, by_id, cfg.starters),
                 unsafe_allow_html=True)

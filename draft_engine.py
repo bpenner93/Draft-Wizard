@@ -967,6 +967,16 @@ def analyze(board_in: list[dict], cfg: LeagueConfig, drafted_ids: list[str],
         # app can offer it without re-sorting a VOR-truncated list (a player with a
         # big cost-of-waiting can rank high for you and sit outside the VOR top 60)
         "ranked": [_slim(p, full=True) for p in remaining[:60]],
+        # ⭐ per-position windows, because a POSITION FILTER cannot be built by
+        # filtering `ranked`. That list is the top 60 by _rec_score, and early in a
+        # 1QB league no quarterback is in it (Allen sits ~47th on VOR and lower
+        # still on score) while K/DST carry a -30 need and never appear at all --
+        # so "show me QBs" would correctly filter to nothing and report "none
+        # left" with thirty of them on the board. Each position keeps its own
+        # window, in decision order; the app re-sorts by whichever ordering is on.
+        "by_pos": {pos: [_slim(q, full=True) for q in remaining
+                         if q["pos"] == pos][:40]
+                   for pos in ("QB", "RB", "WR", "TE", "K", "DST")},
         "best_available": [_slim(p, full=True) for p in best_available[:60]],
         "cost_of_waiting": cow,
         "ebest_next": {k: round(v, 1) for k, v in ebest.items()},

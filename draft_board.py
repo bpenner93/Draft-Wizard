@@ -395,3 +395,80 @@ def status_bar_html(cfg, state, res, on_clock_name: str) -> str:
             + cell("Board", f'{res["board_size_remaining"]} <span style="color:{MUTE};'
                             f'font-weight:400;font-size:12px">left</span>', INK, big=False)
             + '</div>')
+
+
+# --------------------------------------------------------------------------- everyone's team
+POS_ORDER = ("QB", "RB", "WR", "TE", "K", "DST")
+
+
+def team_rosters_html(cfg, state, drafted, by_id, starters: dict | None = None,
+                      only_slot: int | None = None) -> str:
+    """Every seat's ACTUAL ROSTER, side by side — the "let me see people's teams"
+    view. The grid answers *when* a player went; this answers *who has what*.
+
+    One card per seat, players grouped by position with the count against that
+    league's starting requirement, so an unfilled slot reads as a gap rather than
+    as an absence you have to notice. Cards flex-wrap, which is how this stays
+    readable from a 12-across laptop down to one-per-row on a phone without any
+    JS or a viewport measurement Streamlit cannot give us.
+
+    Unmatched Sleeper picks (IDP, UDFA) come through `_drafted_at`, so a team's
+    card is never silently short a player just because our offense-only board
+    cannot rank him."""
+    teams = int(cfg.teams)
+    need = dict(starters or {})
+    smeta = _sleeper_meta(state)
+    my_slot = int(cfg.my_slot)
+
+    # seat -> [(overall, name, pos)]
+    rosters: dict[int, list] = {s: [] for s in range(1, teams + 1)}
+    for i in range(len(drafted)):
+        hit = _drafted_at(i + 1, drafted, by_id, smeta)
+        if not hit:
+            continue
+        rosters[pick_owner_slot(cfg, i + 1)].append((i + 1, hit[0], hit[1]))
+
+    cards = ""
+    seats = [only_slot] if only_slot else range(1, teams + 1)
+    for s in seats:
+        me = (s == my_slot)
+        picks = rosters.get(s, [])
+        rows = ""
+        for pos in POS_ORDER:
+            got = [(o, n) for o, n, p in picks if p == pos]
+            want = int(need.get(pos, 0) or 0)
+            if not got and not want:
+                continue                      # league doesn't use it and nobody took one
+            short = want - len(got)
+            cnt_col = GOLD if short > 0 else (MUTE if not want else "#4ade80")
+            names = ("<br>".join(
+                f'<span style="color:{INK}">{_short(n, 15)}</span>'
+                f'<span style="color:{MUTE};font-size:9px"> {pick_label(cfg, o)}</span>'
+                for o, n in got) or f'<span style="color:{GOLD}">— needs {pos}</span>')
+            rows += (
+                f'<tr>'
+                f'<td style="vertical-align:top;padding:2px 6px 2px 0;white-space:nowrap">'
+                f'<span style="display:inline-block;background:{POS_BG.get(pos, "#475569")};'
+                f'color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px">'
+                f'{pos}</span> '
+                f'<span style="color:{cnt_col};font-size:9px">'
+                f'{len(got)}{"/" + str(want) if want else ""}</span></td>'
+                f'<td style="padding:2px 0;font-size:11px;line-height:1.35">{names}</td>'
+                f'</tr>')
+        if not rows:
+            rows = (f'<tr><td colspan="2" style="color:{MUTE};font-size:11px;padding:4px 0">'
+                    f'No picks yet.</td></tr>')
+        cards += (
+            f'<div style="flex:1 1 210px;min-width:198px;max-width:340px;'
+            f'border:1px solid {MINE if me else LINE};border-radius:9px;'
+            f'background:{"#111c33" if me else FIELD};overflow:hidden">'
+            f'<div style="background:{MINE if me else PANEL};color:#fff;padding:5px 8px;'
+            f'font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;'
+            f'text-overflow:ellipsis">{"★ " if me else ""}{slot_team(cfg, state, s)}'
+            f'<span style="color:{"#bfdbfe" if me else MUTE};font-weight:400;font-size:10px">'
+            f' · seat {s} · {len(picks)} picks</span></div>'
+            f'<table style="width:100%;border-collapse:collapse;padding:4px">'
+            f'{rows}</table></div>')
+
+    return (f'<div style="display:flex;flex-wrap:wrap;gap:8px;'
+            f'font-family:system-ui,-apple-system,sans-serif">{cards}</div>')
